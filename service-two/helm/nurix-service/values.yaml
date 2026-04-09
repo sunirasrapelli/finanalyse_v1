@@ -1,0 +1,359 @@
+# Base Helm Chart - Generic Nurix Service Template
+# This file contains default values that can be overridden by service-specific values
+
+# Namespace configuration
+namespace:
+  name: ""
+
+# Application settings
+application:
+  name: nurix-service
+  
+  # Image configuration (to be overridden by deployment)
+  image:
+    registry: ""
+    repository: ""
+    tag: ""
+    pullPolicy: IfNotPresent
+  
+  # Container configuration
+  container:
+    name: app
+    port: 8000
+    targetPort: 8000
+    metricsPort: 8082
+    command: []
+    args: []
+    
+  # Resource requirements
+  resources:
+    requests:
+      memory: "1Gi"
+      cpu: "500m"
+    limits:
+      memory: "2Gi"
+      cpu: "1000m"
+      
+  # Health checks
+  healthCheck:
+    liveness:
+      enabled: true
+      path: "/"
+      port: 8000
+      initialDelaySeconds: 30
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 3
+    readiness:
+      enabled: true
+      path: "/health"
+      port: 8000
+      initialDelaySeconds: 20
+      periodSeconds: 5
+      timeoutSeconds: 3
+      failureThreshold: 3
+      
+  # Environment variables
+  env: {}
+  
+  # Termination grace period
+  terminationGracePeriodSeconds: 600
+  
+  # Python-specific settings
+  python:
+    path: ""
+  
+  # Database migrations (optional)
+  # Runs as a pre-deployment Helm hook Job
+  migrations:
+    enabled: false
+    # Command to run migrations
+    # Examples:
+    #   - ["/app/.venv/bin/alembic"]  # Direct virtualenv path (recommended)
+    #   - ["poetry", "run", "alembic"]  # Using Poetry
+    #   - ["python", "manage.py"]  # Django
+    command: []
+    # Args for the command (e.g., ["upgrade", "head"] or ["migrate"])
+    args: []
+    # Extra env vars specific to the migration job (merged on top of application.env)
+    # Example:
+    #   APP_MIGRATE_ONLY: "true"
+    env: {}
+    # Number of retries before failing the Helm release (default: 2)
+    backoffLimit: 2
+    # Maximum time for the migration Job to complete (default: 600s = 10 minutes)
+    activeDeadlineSeconds: 600
+    # Time to keep completed Jobs for debugging (default: 3600s = 1 hour)
+    ttlSecondsAfterFinished: 3600
+    resources:
+      requests:
+        memory: "512Mi"
+        cpu: "250m"
+      limits:
+        memory: "1Gi"
+        cpu: "500m"
+
+# Service configuration
+service:
+  name: 
+  enabled: true
+  type: ClusterIP
+  port: 80
+  targetPort: 8000
+  annotations: {}
+
+# Prometheus ServiceMonitor configuration (optional)
+# Note: ServiceMonitor scrapes via Service (load balanced), which may cause inconsistent metrics
+# Use PodMonitor instead to scrape each pod individually for consistent metrics
+serviceMonitor:
+  enabled: false
+  name: ""
+  namespace: ""
+  labels: {}
+  annotations: {}
+  namespaceSelector: null
+  selector: null
+  endpoints:
+    - port: metrics
+      interval: 30s
+      path: /metrics
+      scheme: http
+      servicePort: 81
+      targetPort: 8082
+      honorLabels: false
+      metricRelabelings: []
+
+# Prometheus PodMonitor configuration (recommended)
+# PodMonitor scrapes each pod individually, ensuring all pods are scraped and metrics are consistent
+podMonitor:
+  enabled: false
+  name: ""
+  namespace: ""
+  labels: {}
+  annotations: {}
+  namespaceSelector: null
+  podMetricsEndpoints:
+    - port: metrics
+      interval: 30s
+      path: /metrics
+      scheme: http
+      honorLabels: false
+      metricRelabelings: []
+
+# Ingress configuration
+ingress:
+  enabled: false
+  ingressClassName: "alb"
+  healthcheckIntervalSeconds: "30"
+  healthcheckPath: "/"
+  healthcheckTimeoutSeconds: "5"
+  healthyThresholdCount: "2"
+  listenPorts: '[{"HTTP": 80}]'
+  scheme: "internet-facing"
+  targetType: "ip"
+  unhealthyThresholdCount: "3"
+  additionalAnnotations:
+    alb.ingress.kubernetes.io/group.order: "20"
+  hosts:
+    - host: ""
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# VPN Ingress configuration
+vpnIngress:
+  enabled: false
+  ingressClassName: "alb"
+  healthcheckIntervalSeconds: "30"
+  healthcheckPath: "/"
+  healthcheckTimeoutSeconds: "5"
+  healthyThresholdCount: "2"
+  listenPorts: '[{"HTTPS": 443}]'
+  scheme: "internet-facing"
+  targetType: "ip"
+  unhealthyThresholdCount: "3"
+  additionalAnnotations:
+    alb.ingress.kubernetes.io/group.order: "20"
+  hosts:
+    - host: ""
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# Ingress configuration
+internalIngress:
+  enabled: false
+  ingressClassName: "alb"
+  healthcheckIntervalSeconds: "30"
+  healthcheckPath: "/"
+  healthcheckTimeoutSeconds: "5"
+  healthyThresholdCount: "2"
+  listenPorts: '[{"HTTP": 80}]'
+  scheme: "internal"
+  targetType: "ip"
+  unhealthyThresholdCount: "3"
+  additionalAnnotations:
+    alb.ingress.kubernetes.io/group.order: "20"
+  hosts:
+    - host: ""
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# WebSocket Ingress configuration
+wssIngress:
+  enabled: false
+  ingressClassName: "alb"
+  healthcheckIntervalSeconds: "30"
+  healthcheckPath: "/"
+  healthcheckTimeoutSeconds: "5"
+  healthyThresholdCount: "2"
+  listenPorts: '[{"HTTPS": 443}]'
+  scheme: "internet-facing"
+  targetType: "ip"
+  unhealthyThresholdCount: "3"
+  additionalAnnotations:
+    alb.ingress.kubernetes.io/group.order: "20"
+  hosts:
+    - host: ""
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# Pod-level settings
+pods:
+  replicas: 1
+  podLabels: {}
+  podAnnotations: {}
+
+# PodDisruptionBudget
+# When selector matches both Deployment and CronJob/Job pods, the PDB controller fails to sync
+# (jobs.batch does not implement the scale subresource) and sets disruptionsAllowed: 0. Override
+# selectorMatchExpressions to narrow the PDB to e.g. Deployment pods only (pod-template-hash Exists).
+pdb:
+  minAvailable: "50%"
+  # Optional list of label selector matchExpressions (key, operator, optional values).
+  # Example: restrict to Deployment pods only (excludes CronJob/Job pods):
+  #   selectorMatchExpressions:
+  #     - key: pod-template-hash
+  #       operator: Exists
+  # Example: In operator with values:
+  #   - key: app.kubernetes.io/component
+  #     operator: In
+  #     values: ["app"]
+  selectorMatchExpressions: []
+
+# PrometheusRule (recording/alerting rules)
+# When enabled, creates a PrometheusRule with spec.groups from prometheusRule.groups.
+# Rule selector labels (app, release) are hardcoded to match kube-prometheus-stack.
+prometheusRule:
+  enabled: false
+  # Name of the PrometheusRule resource (default: release fullname)
+  name: ""
+  # List of rule groups; each has name, optional interval, and rules (record/expr or alert/labels/expr).
+  groups: []
+
+# Horizontal Pod Autoscaler
+hpa:
+  enabled: true
+  minReplicas: 1
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 80
+  targetMemoryUtilizationPercentage: 80
+  # Additional metrics (Pods, Object, External, ContainerResource). Appended after CPU/memory.
+  # Example (Pods metric): { type: Pods, pods: { metric: { name: "requests-per-second" }, target: { type: AverageValue, averageValue: "1k" } } }
+  # Example (Object metric): { type: Object, object: { metric: { name: "..." }, describedObject: {...}, target: {...} } }
+  additionalMetrics: []
+
+# KEDA ScaledObject configuration
+# KEDA allows event-driven autoscaling with support for various trigger types
+# Note: When KEDA is enabled, it manages the HPA. Set hpa.enabled=false to avoid conflicts.
+# See README.md for configuration examples and trigger types.
+keda:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 10
+  triggers: []
+  advanced: {}
+
+# Service account
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# Configuration management
+config:
+  # ConfigMap containing non-sensitive configuration
+  configMapName: ""
+  
+  # Secret containing sensitive configuration
+  secretName: ""
+  
+  # Mount paths for configuration files
+  mountPath: "/app/config"
+
+# Optional tmpfs (in-memory) volumes for scratch/temp data
+# Uses Kubernetes emptyDir with medium: Memory
+tmpfs:
+  enabled: false
+  # volumes:
+  #   - name: tmp
+  #     mountPath: /tmp
+  #     sizeLimit: 512Mi
+  #   - name: cache
+  #     mountPath: /app/cache
+  #     sizeLimit: 128Mi
+  volumes: []
+
+# ConfigMap configuration (for the configmap.yaml template)
+configMap:
+  enabled: false
+  data: {}
+
+# Secret configuration (for the secret.yaml template)
+secret:
+  enabled: false
+  name: ""
+  data: {}
+  stringData: {}
+  annotations: {}
+
+# CronJob configuration
+cronJobs:
+  # - name: cleanup
+  #   enabled: false
+  #   schedule: "*/5 * * * *"
+  #   image: curlimages/curl:latest
+  #   command:
+  #     - /bin/sh
+  #     - -c
+  #   args:
+  #     - curl -f http://python-service:80/health || exit 1
+
+# Global values (can be set by parent charts)
+global:
+  environment: "dev"
+  aws:
+    region: "ap-south-1"
+
+# Linkerd service mesh configuration
+linkerd:
+  enabled: false
+
+# Kubernetes-specific settings
+replicaCount: 1
+imagePullSecrets: []
+nodeSelector: {}
+affinity: {}
+tolerations: []
+securityContext: {}
+annotations: {}
+
+# Name overrides
+nameOverride: ""
+fullnameOverride: ""

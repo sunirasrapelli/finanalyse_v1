@@ -1,0 +1,5 @@
+# AppConfig profile name: in-hack-app-config (uploaded by scripts/bootstrap-appconfig-for-helm.sh).
+# After changing this file, re-run the bootstrap script (or create a new hosted version in the console),
+# then deploy that version to the "hack" environment in AppConfig.
+#
+# PLACEHOLDER

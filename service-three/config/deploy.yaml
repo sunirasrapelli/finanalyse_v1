@@ -1,0 +1,78 @@
+# ── service-three — Java Spring Boot (Maven) example ─────────────────────────
+# This folder is an example. Delete it if your team doesn't need it, or rename
+# the folder and update helmReleaseName / namespace below.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Pipeline config ───────────────────────────────────────────────────────────
+helmReleaseName: service-three
+namespace: team-hack
+helmChart: ./helm/nurix-service
+dockerfilePath: ./helm/java-service-maven.Dockerfile
+
+docker:
+  buildArgs:
+    JAVA_VERSION: "21"
+    BUILD_ENV: staging
+    PORT: "8080"
+    # Activate a Maven profile (e.g. "staging"). Leave empty for default build.
+    MAVEN_PROFILES: ""
+  # GIT_TOKEN repo secret is injected automatically if set.
+  # Required only if your pom.xml pulls from a private GitHub Packages Maven repo.
+
+image:
+  tag: latest
+
+# ── Helm values (nurix-service chart) ────────────────────────────────────────
+application:
+  container:
+    port: 8080
+    targetPort: 8080
+    args: []
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "1Gi"
+    limits:
+      cpu: "1000m"
+      memory: "2Gi"
+  healthCheck:
+    liveness:
+      path: "/actuator/health/liveness"
+      port: 8080
+      initialDelaySeconds: 60
+      periodSeconds: 15
+      failureThreshold: 5
+    readiness:
+      path: "/actuator/health/readiness"
+      port: 8080
+      initialDelaySeconds: 30
+      periodSeconds: 10
+      failureThreshold: 3
+  terminationGracePeriodSeconds: 60
+  env:
+    SPRING_PROFILES_ACTIVE: "staging"
+    SERVER_PORT: "8080"
+    JAVA_OPTS: "-Xms512m -Xmx1g -XX:+UseG1GC"
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+
+ingress:
+  enabled: true
+  scheme: "internal"
+  hosts:
+    - host: "service-three-in.hack.nurixlabs.tech"
+      paths:
+        - path: /
+          pathType: Prefix
+
+pods:
+  replicas: 1
+
+hpa:
+  enabled: false
+
+global:
+  environment: "stage"

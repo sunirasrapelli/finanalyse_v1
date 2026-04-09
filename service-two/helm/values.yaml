@@ -1,0 +1,196 @@
+# =============================================================================
+# Helm values — fill in your service name before deploy / AppConfig upload
+# =============================================================================
+#
+# 1. Pick one canonical name (e.g. hackathon-service). It must match:
+#    - CI_SERVICE_NAME in .github/workflows/build.yml
+#    - Your AppConfig application name (see scripts/bootstrap-appconfig-for-helm.sh).
+#      AppConfig also uses helm/config.yml under profile "in-hack-app-config" — deploy that after bootstrap.
+#
+# 2. Replace every "<service-name>" placeholder in this file with that name
+#    (search the file for: <service-name>) before pasting into AppConfig hosted config.
+#
+# 3. Update app-specific fields the placeholders do not cover: container command/args,
+#    health paths, env vars, resource requests/limits, node selectors, and any
+#    IAM role ARNs or hostnames that should not use the generic pattern.
+#
+# =============================================================================
+
+application:
+  name: "<service-name>"
+
+  # Image configuration (to be overridden by deployment)
+  image:
+    registry: ""
+    repository: ""
+    tag: ""
+    pullPolicy: IfNotPresent
+
+  # Container configuration
+  container:
+    name: app
+    port: 8001
+    targetPort: 8081
+    metricsPort: 8082
+    command: ["poetry", "run", "python"] # <service-name> replace with your service command
+    args: ["voicex/worker_layer/worker.py", "start"] # <service-name> replace with your service args
+
+  # Resource requirements
+  resources:
+    requests:
+      memory: "2Gi"
+      cpu: "1000m"
+    limits:
+      memory: "4Gi"
+      cpu: "2000m"
+
+  # Health checks
+  healthCheck:
+    liveness:
+      enabled: true
+      path: "/"
+      port: 8081
+      initialDelaySeconds: 30
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 3
+    readiness:
+      enabled: true
+      path: "/worker"
+      port: 8081
+      initialDelaySeconds: 20
+      periodSeconds: 5
+      timeoutSeconds: 3
+      failureThreshold: 3
+
+  # Environment variables
+  env:
+    LOG_LEVEL: "INFO"
+    ENABLE_JSON_LOGS: "true"
+    ROLLBAR_CODE_VERSION: ""
+
+  # Termination grace period
+  terminationGracePeriodSeconds: 600
+
+  # Python-specific settings
+  python:
+    path: "/app"
+
+# Service configuration
+service:
+  name: "<service-name>"
+  enabled: true
+  type: "ClusterIP"
+  port: 80
+  targetPort: 8081
+  annotations: {}
+
+podMonitor:
+  enabled: true
+  podMetricsEndpoints:
+    - port: metrics
+      interval: 30s
+      path: /metrics
+      scheme: http
+
+vpnIngress:
+  enabled: true
+  ingressClassName: "alb"
+  healthcheckIntervalSeconds: "30"
+  healthcheckPath: "/"
+  healthcheckTimeoutSeconds: "5"
+  healthyThresholdCount: "2"
+  listenPorts: '[{"HTTP": 80},{"HTTPS": 443}]'
+  scheme: "internet-facing"
+  targetType: "ip"
+  unhealthyThresholdCount: "3"
+  additionalAnnotations:
+    alb.ingress.kubernetes.io/group.order: "20"
+  hosts:
+    - host: "<service-name>-in.hack.nurixlabs.tech"
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+internalIngress:
+  enabled: true
+  ingressClassName: "alb"
+  healthcheckIntervalSeconds: "30"
+  healthcheckPath: "/"
+  healthcheckTimeoutSeconds: "5"
+  healthyThresholdCount: "2"
+  listenPorts: '[{"HTTP": 80},{"HTTPS": 443}]'
+  scheme: "internal"
+  targetType: "ip"
+  unhealthyThresholdCount: "3"
+  additionalAnnotations:
+    alb.ingress.kubernetes.io/group.order: "20"
+  hosts:
+    - host: "<service-name>-in.hack.nurixlabs.tech"
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# Pod-level settings
+pods:
+  replicas: 3
+  podLabels: {}
+  podAnnotations: {}
+
+# Horizontal Pod Autoscaler
+hpa:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 12
+  targetCPUUtilizationPercentage: 50
+  targetMemoryUtilizationPercentage: 50
+
+# Service account
+serviceAccount:
+  create: true
+  name: ""
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::632421564644:role/hack-sa
+
+# Configuration management
+config:
+  # ConfigMap containing non-sensitive configuration
+  configMapName: "<service-name>-in-hack-app-configs"
+
+  # Secret containing sensitive configuration
+  secretName: "<service-name>-in-hack-secret-configs"
+
+  # Mount paths for configuration files
+  mountPath: "/app/config"
+
+# ConfigMap configuration (for the configmap.yaml template)
+configMap:
+  enabled: false
+  data:
+    app_config.yaml: ""
+
+# Global values (can be set by parent charts)
+global:
+  environment: "stage"
+  regionCode: "in"
+  aws:
+    region: "ap-south-1"
+
+# Kubernetes-specific settings
+replicaCount: 3
+imagePullSecrets: []
+nodeSelector:
+  node-type: "cpu-intensive"
+affinity: {}
+tolerations:
+  - key: cpu-intensive
+    value: dedicated
+    effect: NoSchedule
+securityContext: {}
+annotations: {}
+
+# Name overrides
+nameOverride: ""
+fullnameOverride: "<service-name>-in-hack"

@@ -1,0 +1,55 @@
+{{- if and .Values.serviceMonitor.enabled .Values.service.enabled }}
+{{- $serviceNamespace := default .Release.Namespace .Values.namespace.name }}
+{{- $monitorNamespace := default $serviceNamespace .Values.serviceMonitor.namespace }}
+{{- $defaultMonitorName := printf "%s-servicemonitor" (include "nurix-service.fullname" .) | trunc 63 | trimSuffix "-" }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ default $defaultMonitorName .Values.serviceMonitor.name }}
+  namespace: {{ $monitorNamespace }}
+  labels:
+    {{- include "nurix-service.labels" . | nindent 4 }}
+    {{- with .Values.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.serviceMonitor.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.serviceMonitor.namespaceSelector }}
+  namespaceSelector:
+{{ toYaml .Values.serviceMonitor.namespaceSelector | nindent 4 }}
+  {{- else }}
+  namespaceSelector:
+    matchNames:
+      - {{ $serviceNamespace }}
+  {{- end }}
+  {{- if .Values.serviceMonitor.selector }}
+  selector:
+{{ toYaml .Values.serviceMonitor.selector | nindent 4 }}
+  {{- else }}
+  selector:
+    matchLabels:
+      {{- include "nurix-service.selectorLabels" . | nindent 6 }}
+  {{- end }}
+  endpoints:
+{{- if .Values.serviceMonitor.endpoints }}
+{{ toYaml .Values.serviceMonitor.endpoints | nindent 4 }}
+{{- else }}
+    - port: {{ .Values.serviceMonitor.port | default "http" }}
+      {{- with .Values.serviceMonitor.path }}
+      path: {{ . }}
+      {{- end }}
+      {{- with .Values.serviceMonitor.interval }}
+      interval: {{ . }}
+      {{- end }}
+      {{- with .Values.serviceMonitor.scheme }}
+      scheme: {{ . }}
+      {{- end }}
+      {{- if hasKey .Values.serviceMonitor "honorLabels" }}
+      honorLabels: {{ .Values.serviceMonitor.honorLabels }}
+      {{- end }}
+{{- end }}
+{{- end }}
+

@@ -1,0 +1,33 @@
+name: Deploy
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Trigger stub — this is the ONLY workflow file teams need in their repo.
+#
+# All detection and deploy logic lives in the central repo:
+#   nurixlabs/hack-central-apr-26/.github/workflows/deploy.yml
+#
+# Push events must fire from within the team repo (GitHub limitation), so this
+# stub captures the trigger and immediately hands off to the central workflow.
+# Teams should not need to edit anything below.
+# ──────────────────────────────────────────────────────────────────────────────
+
+on:
+  push:
+    branches:
+      - stage
+    paths:
+      - 'service-*/**'
+
+  workflow_dispatch:
+    inputs:
+      service_path:
+        description: "Service folder to deploy (e.g. service-one). Leave empty to auto-detect from last commit."
+        required: false
+        type: string
+
+jobs:
+  deploy:
+    uses: nurixlabs/hack-central-apr-26/.github/workflows/deploy.yml@stage
+    with:
+      service_path: ${{ github.event.inputs.service_path || '' }}
+    secrets: inherit

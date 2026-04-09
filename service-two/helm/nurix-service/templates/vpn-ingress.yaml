@@ -1,0 +1,62 @@
+{{- if .Values.vpnIngress.enabled }}
+{{- $fullName := include "nurix-service.serviceName" . -}}
+{{- $svcPort := .Values.service.port -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "nurix-service.fullname" . }}-vpn
+  namespace: {{ .Values.namespace.name | default .Release.Namespace }}
+  labels:
+    {{- include "nurix-service.labels" . | nindent 4 }}
+  annotations:
+{{- if not .Values.vpnIngress.ingressClassName }}
+    kubernetes.io/ingress.class: "alb"
+{{- end }}
+    alb.ingress.kubernetes.io/group.name: "{{ .Values.global.regionCode }}-{{ .Values.global.environment }}-eks-alb-vpn"
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: "{{ .Values.vpnIngress.healthcheckIntervalSeconds }}"
+    alb.ingress.kubernetes.io/healthcheck-path: "{{ .Values.vpnIngress.healthcheckPath }}"
+    alb.ingress.kubernetes.io/healthcheck-timeout-seconds: "{{ .Values.vpnIngress.healthcheckTimeoutSeconds }}"
+    alb.ingress.kubernetes.io/healthy-threshold-count: "{{ .Values.vpnIngress.healthyThresholdCount }}"
+    alb.ingress.kubernetes.io/listen-ports: {{ .Values.vpnIngress.listenPorts | quote }}
+    alb.ingress.kubernetes.io/load-balancer-name: "{{ .Values.global.regionCode }}-{{ .Values.global.environment }}-eks-alb-vpn"
+    alb.ingress.kubernetes.io/scheme: "internet-facing"
+    alb.ingress.kubernetes.io/target-type: "{{ .Values.vpnIngress.targetType }}"
+    alb.ingress.kubernetes.io/unhealthy-threshold-count: "{{ .Values.vpnIngress.unhealthyThresholdCount }}"
+    alb.ingress.kubernetes.io/certificate-arn: "{{ include "nurix-service.albCertArn" . }}"
+  {{- with .Values.vpnIngress.additionalAnnotations }}
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.vpnIngress.ingressClassName }}
+  ingressClassName: {{ .Values.vpnIngress.ingressClassName }}
+  {{- end }}
+  {{- if .Values.vpnIngress.tls }}
+  tls:
+    {{- range .Values.vpnIngress.tls }}
+    - hosts:
+        {{- range .hosts }}
+        - {{ . | quote }}
+        {{- end }}
+      secretName: {{ .secretName }}
+    {{- end }}
+  {{- end }}
+  rules:
+    {{- range .Values.vpnIngress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            {{- if .pathType }}
+            pathType: {{ .pathType }}
+            {{- else }}
+            pathType: Prefix
+            {{- end }}
+            backend:
+              service:
+                name: {{ $fullName }}
+                port:
+                  number: {{ $svcPort }}
+          {{- end }}
+    {{- end }}
+{{- end }}

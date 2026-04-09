@@ -1,0 +1,18 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "nurix-service.fullname" . }}
+  namespace: {{ .Values.namespace.name | default .Release.Namespace }}
+  labels:
+    {{- include "nurix-service.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ (.Values.pdb | default dict).minAvailable | default "50%" }}
+  selector:
+    matchLabels:
+      {{- include "nurix-service.selectorLabels" . | nindent 6 }}
+    {{- with (.Values.pdb | default dict).selectorMatchExpressions }}
+    {{- if . }}
+    matchExpressions:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- end }}

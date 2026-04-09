@@ -1,0 +1,95 @@
+{{- if .Values.application.migrations.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "nurix-service.fullname" . }}-migration-{{ .Values.application.image.tag | replace "." "-" | replace ":" "-" | trunc 63 | trimSuffix "-" }}
+  namespace: {{ .Values.namespace.name | default .Release.Namespace }}
+  labels:
+    {{- include "nurix-service.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migration
+  annotations:
+    # Run BEFORE deployment resources are created/updated
+    "helm.sh/hook": pre-upgrade,pre-install
+    # Execute early (lower weight = earlier execution)
+    "helm.sh/hook-weight": "-5"
+    # Clean up old migration Jobs before creating new ones
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  # Retry up to 3 times on failure, then fail the entire Helm release
+  backoffLimit: {{ .Values.application.migrations.backoffLimit | default 1 }}
+  # Clean up completed Jobs after specified time
+  ttlSecondsAfterFinished: {{ .Values.application.migrations.ttlSecondsAfterFinished | default 3600 }}
+  # Set activeDeadlineSeconds to prevent hanging Jobs
+  activeDeadlineSeconds: {{ .Values.application.migrations.activeDeadlineSeconds | default 600 }}
+  template:
+    metadata:
+      labels:
+        {{- include "nurix-service.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: migration
+    spec:
+      serviceAccountName: {{ include "nurix-service.serviceAccountName" . }}
+      restartPolicy: Never
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: db-migrations
+          image: "{{ .Values.application.image.registry }}/{{ .Values.application.image.repository }}:{{ .Values.application.image.tag }}"
+          imagePullPolicy: {{ .Values.application.image.pullPolicy }}
+          command:
+            {{- toYaml .Values.application.migrations.command | nindent 12 }}
+          {{- if .Values.application.migrations.args }}
+          args:
+            {{- toYaml .Values.application.migrations.args | nindent 12 }}
+          {{- end }}
+          env:
+            {{- range $key, $value := .Values.application.env }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+            {{- range $key, $value := .Values.application.migrations.env }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+            - name: APP_CONFIG_PATH
+              value: "{{ .Values.config.mountPath }}/app-config.yaml"
+            - name: SECRET_CONFIG_PATH
+              value: "{{ .Values.config.mountPath }}/secret-config.yaml"
+          {{- if .Values.config.secretName }}
+          envFrom:
+            - secretRef:
+                name: {{ .Values.config.secretName }}
+          {{- end }}
+          volumeMounts:
+            {{- if .Values.config.configMapName }}
+            - name: app-config
+              mountPath: {{ .Values.config.mountPath }}/app-config.yaml
+              subPath: app-config.yaml
+              readOnly: true
+            {{- end }}
+          resources:
+            {{- toYaml .Values.application.migrations.resources | nindent 12 }}
+      {{- if or .Values.config.configMapName .Values.config.secretName }}
+      volumes:
+      {{- if .Values.config.configMapName }}
+        - name: app-config
+          configMap:
+            name: {{ .Values.config.configMapName }}
+      {{- end }}
+      {{- if .Values.config.secretName }}
+        - name: secret-config
+          secret:
+            secretName: {{ .Values.config.secretName }}
+      {{- end }}
+      {{- end }}
+{{- end }}
+

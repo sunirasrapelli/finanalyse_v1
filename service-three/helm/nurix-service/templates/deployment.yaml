@@ -1,0 +1,167 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "nurix-service.fullname" . }}
+  namespace: {{ .Values.namespace.name | default .Release.Namespace }}
+  labels:
+    {{- include "nurix-service.labels" . | nindent 4 }}
+  {{- with .Values.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  revisionHistoryLimit: 2
+  {{- if not .Values.hpa.enabled }}
+  replicas: {{ .Values.replicaCount | default 1 }}
+  {{- end }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 100%
+  selector:
+    matchLabels:
+      {{- include "nurix-service.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "nurix-service.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- if or .Values.podAnnotations .Values.config.configMapName .Values.config.secretName .Values.linkerd.enabled }}
+      annotations:
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- if .Values.config.configMapName }}
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- end }}
+        {{- if .Values.config.secretName }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
+        {{- if .Values.linkerd.enabled }}
+        linkerd.io/inject: "enabled"
+        {{- end }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "nurix-service.serviceAccountName" . }}
+      terminationGracePeriodSeconds: {{ .Values.application.terminationGracePeriodSeconds }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.securityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ .Values.application.container.name }}
+          image: "{{ .Values.application.image.registry }}/{{ .Values.application.image.repository }}:{{ .Values.application.image.tag }}"
+          imagePullPolicy: {{ .Values.application.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.application.container.port }}
+              protocol: TCP
+            {{- if or .Values.podMonitor.enabled .Values.serviceMonitor.enabled }}
+            - name: metrics
+              containerPort: {{ .Values.application.container.metricsPort }}
+              protocol: TCP
+            {{- end }}
+          {{- if .Values.application.container.command }}
+          command:
+            {{- toYaml .Values.application.container.command | nindent 12 }}
+          {{- end }}
+          {{- if .Values.application.container.args }}
+          args:
+            {{- toYaml .Values.application.container.args | nindent 12 }}
+          {{- end }}
+          env:
+            {{- range $key, $value := .Values.application.env }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+            # Config file paths
+            - name: APP_CONFIG_PATH
+              value: "{{ .Values.config.mountPath }}/app-config.yaml"
+            - name: SECRET_CONFIG_PATH
+              value: "{{ .Values.config.mountPath }}/secret-config.yaml"
+          {{- if .Values.config.secretName }}
+          envFrom:
+            - secretRef:
+                name: {{ .Values.config.secretName }}
+          {{- end }}
+          volumeMounts:
+            {{- if .Values.config.configMapName }}
+            - name: app-config
+              mountPath: {{ .Values.config.mountPath }}/app-config.yaml
+              subPath: app-config.yaml
+              readOnly: true
+            {{- end }}
+            {{- if and .Values.tmpfs.enabled .Values.tmpfs.volumes }}
+            {{- range .Values.tmpfs.volumes }}
+            - name: {{ .name }}
+              mountPath: {{ .mountPath }}
+            {{- end }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.application.resources | nindent 12 }}
+          {{- if .Values.application.healthCheck.liveness.enabled }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.application.healthCheck.liveness.path }}
+              port: {{ .Values.application.healthCheck.liveness.port }}
+            initialDelaySeconds: {{ .Values.application.healthCheck.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.application.healthCheck.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.application.healthCheck.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.application.healthCheck.liveness.failureThreshold }}
+          {{- end }}
+          {{- if .Values.application.healthCheck.readiness.enabled }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.application.healthCheck.readiness.path }}
+              port: {{ .Values.application.healthCheck.readiness.port }}
+            initialDelaySeconds: {{ .Values.application.healthCheck.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.application.healthCheck.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.application.healthCheck.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.application.healthCheck.readiness.failureThreshold }}
+          {{- end }}
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "15"]
+      {{- if or .Values.config.configMapName .Values.config.secretName .Values.tmpfs.enabled }}
+      volumes:
+      {{- if .Values.config.configMapName }}
+        - name: app-config
+          configMap:
+            name: {{ .Values.config.configMapName }}
+      {{- end }}
+      {{- if .Values.config.secretName }}
+        - name: secret-config
+          secret:
+            secretName: {{ .Values.config.secretName }}
+      {{- end }}
+      {{- if and .Values.tmpfs.enabled .Values.tmpfs.volumes }}
+      {{- range .Values.tmpfs.volumes }}
+        - name: {{ .name }}
+          emptyDir:
+            medium: Memory
+            {{- with .sizeLimit }}
+            sizeLimit: {{ . }}
+            {{- end }}
+      {{- end }}
+      {{- end }}
+      {{- end }}

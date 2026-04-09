@@ -1,0 +1,74 @@
+# ── service-two — Next.js example ────────────────────────────────────────────
+# This folder is an example. Delete it if your team doesn't need it, or rename
+# the folder and update helmReleaseName / namespace below.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Pipeline config ───────────────────────────────────────────────────────────
+helmReleaseName: service-two
+namespace: team-hack
+helmChart: ./helm/nurix-service
+dockerfilePath: ./helm/nextjs-service.Dockerfile
+
+docker:
+  buildArgs:
+    BUILD_ENV: staging
+    CI: "true"
+  # ORG_YARNRC repo secret is injected automatically if set.
+  # Required only if you use private @nurixlabs npm packages.
+
+image:
+  tag: latest
+
+# ── Helm values (nurix-service chart) ────────────────────────────────────────
+application:
+  container:
+    port: 3000
+    targetPort: 3000
+    command: []
+    args: []
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "512Mi"
+    limits:
+      cpu: "1000m"
+      memory: "1Gi"
+  healthCheck:
+    liveness:
+      path: "/api/health"
+      port: 3000
+      initialDelaySeconds: 30
+      periodSeconds: 10
+    readiness:
+      path: "/api/health"
+      port: 3000
+      initialDelaySeconds: 15
+      periodSeconds: 5
+  env:
+    NODE_ENV: "production"
+    NEXT_TELEMETRY_DISABLED: "1"
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 3000
+
+# Internet-facing ALB ingress for the frontend
+ingress:
+  enabled: true
+  scheme: "internet-facing"
+  listenPorts: '[{"HTTP": 80},{"HTTPS": 443}]'
+  hosts:
+    - host: "service-two.hack.nurixlabs.tech"
+      paths:
+        - path: /
+          pathType: Prefix
+
+pods:
+  replicas: 1
+
+hpa:
+  enabled: false
+
+global:
+  environment: "stage"

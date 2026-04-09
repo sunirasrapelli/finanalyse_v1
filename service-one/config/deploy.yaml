@@ -1,0 +1,80 @@
+# ── service-one — Python FastAPI example ─────────────────────────────────────
+# This folder is an example. Delete it if your team doesn't need it, or rename
+# the folder and update helmReleaseName / namespace below.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Pipeline config ───────────────────────────────────────────────────────────
+helmReleaseName: service-one
+namespace: team-hack
+helmChart: ./helm/nurix-service
+dockerfilePath: ./helm/python-service.Dockerfile
+
+docker:
+  buildArgs:
+    PYTHON_VERSION: "3.12"
+    BUILD_ENV: staging
+    PORT: "8000"
+    # Update this to your actual FastAPI app entrypoint: package.module:app_variable
+    POETRY_APP_MODULE: "api.main:app"
+
+image:
+  tag: latest
+
+# ── Helm values (nurix-service chart) ────────────────────────────────────────
+application:
+  container:
+    port: 8000
+    targetPort: 8000
+    command: ["uvicorn"]
+    args:
+      - "api.main:app"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8000"
+      - "--workers"
+      - "2"
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "512Mi"
+    limits:
+      cpu: "1000m"
+      memory: "1Gi"
+  healthCheck:
+    liveness:
+      path: "/health"
+      port: 8000
+      initialDelaySeconds: 20
+      periodSeconds: 10
+    readiness:
+      path: "/health"
+      port: 8000
+      initialDelaySeconds: 10
+      periodSeconds: 5
+  env:
+    LOG_LEVEL: "INFO"
+    APP_ENV: "staging"
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8000
+
+ingress:
+  enabled: true
+  scheme: "internal"
+  hosts:
+    - host: "service-one-in.hack.nurixlabs.tech"
+      paths:
+        - path: /
+          pathType: Prefix
+
+pods:
+  replicas: 1
+
+hpa:
+  enabled: false
+
+global:
+  environment: "stage"

@@ -1,0 +1,15 @@
+{{- if (.Values.prometheusRule | default dict).enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ (.Values.prometheusRule | default dict).name | default (include "nurix-service.fullname" .) }}
+  namespace: {{ .Values.namespace.name | default .Release.Namespace }}
+  labels:
+    {{- include "nurix-service.labels" . | nindent 4 }}
+    # Match kube-prometheus-stack ruleSelector (verified in prod in-prod-eks-03)
+    app: kube-prometheus-stack
+    release: kube-prometheus-stack
+spec:
+  groups:
+    {{- toYaml (.Values.prometheusRule | default dict).groups | nindent 4 }}
+{{- end }}

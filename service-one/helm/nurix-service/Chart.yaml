@@ -1,0 +1,13 @@
+apiVersion: v2
+name: "nurix-service"
+description: "A flexible Helm chart for deploying Nurix services on Kubernetes"
+type: application
+version: "1.0.2"
+appVersion: "0.0.1"
+
+# Home page
+home: https://github.com/nurixlabs/base-helm-charts
+
+# Sources
+sources:
+  - https://github.com/nurixlabs/base-helm-charts
