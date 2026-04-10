@@ -1,0 +1,13 @@
+Please extract all three financial statements from this annual report.
+
+Company: {company_name}
+Fiscal year(s) to extract: {years}
+Expected currency and unit: {currency} {unit}
+
+Extract:
+1. Consolidated Statement of Profit and Loss (Income Statement)
+2. Consolidated Balance Sheet (Statement of Financial Position)
+3. Consolidated Statement of Cash Flows
+
+If the report contains comparative figures for prior years, extract those too.
+Use the extract_financial_statements tool to return the structured data.

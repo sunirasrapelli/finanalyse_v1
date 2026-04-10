@@ -1,0 +1,76 @@
+# ── service-backend — FinAnalyse Python FastAPI ───────────────────────────────
+
+# ── Pipeline config ───────────────────────────────────────────────────────────
+helmReleaseName: finanalyse-backend
+namespace: team-ppo-nahi-milega
+helmChart: ./helm/nurix-service
+dockerfilePath: ./helm/Dockerfile
+
+docker:
+  buildArgs:
+    PYTHON_VERSION: "3.11"
+    BUILD_ENV: staging
+    PORT: "8000"
+
+image:
+  tag: latest
+
+# ── Helm values (nurix-service chart) ────────────────────────────────────────
+application:
+  container:
+    port: 8000
+    targetPort: 8000
+    command: ["uvicorn"]
+    args:
+      - "web.app:app"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8000"
+      - "--workers"
+      - "1"
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "1Gi"
+    limits:
+      cpu: "2000m"
+      memory: "3Gi"
+  healthCheck:
+    liveness:
+      path: "/health"
+      port: 8000
+      initialDelaySeconds: 30
+      periodSeconds: 10
+    readiness:
+      path: "/health"
+      port: 8000
+      initialDelaySeconds: 15
+      periodSeconds: 5
+  env:
+    LOG_LEVEL: "INFO"
+    APP_ENV: "staging"
+    MOCK_EXTRACTION: "false"
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8000
+
+ingress:
+  enabled: true
+  scheme: "internal"
+  hosts:
+    - host: "finanalyse-backend-in.hack.nurixlabs.tech"
+      paths:
+        - path: /
+          pathType: Prefix
+
+pods:
+  replicas: 1
+
+hpa:
+  enabled: false
+
+global:
+  environment: "stage"
