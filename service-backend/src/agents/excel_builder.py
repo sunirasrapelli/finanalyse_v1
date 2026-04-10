@@ -120,17 +120,22 @@ def _build_cover(wb: xlsxwriter.Workbook, sty: StyleBook,
     # Table of Contents
     ws.write("A8", "Contents", sty.subtitle)
     sheets = [
-        (SH_IS,  "Income Statement (Profit & Loss)"),
-        (SH_BS,  "Balance Sheet"),
-        (SH_CF,  "Cash Flow Statement"),
-        (SH_RT,  "Financial Ratios & Analysis"),
-        (SH_VR,  "Verification & Quality Checks"),
-        (SH_ST,  "Settings & Assumptions"),
-        (SH_WC,  "WACC & Cost of Capital"),
-        (SH_DCF, "DCF Valuation (5-Year FCF Model)"),
-        (SH_DDM, "DDM Valuation (Dividend Discount)"),
-        (SH_CMP, "Comparable Company Analysis"),
-        ("Charts","Charts & Visualisations"),
+        (SH_IS,          "Income Statement (Profit & Loss)"),
+        (SH_BS,          "Balance Sheet"),
+        (SH_CF,          "Cash Flow Statement"),
+        ("Common Size",  "Common Size Analysis (% of Revenue / Assets)"),
+        (SH_RT,          "Financial Ratios & Analysis"),
+        ("Forecasting",  "Forecasting — WMA 5-Year Projections"),
+        ("Beta Regression", "Beta Regression (NIFTY 50, Blume-Adjusted)"),
+        (SH_WC,          "WACC & Cost of Capital"),
+        (SH_DCF,         "DCF Valuation (5-Year FCF Model)"),
+        (SH_DDM,         "DDM Valuation (Dividend Discount)"),
+        (SH_CMP,         "Comparable Company Analysis"),
+        ("VaR & Simulation", "VaR & Monte Carlo Simulation"),
+        ("DuPont Analysis",  "DuPont Analysis (3-Factor ROE)"),
+        (SH_VR,          "Verification & Quality Checks"),
+        (SH_ST,          "Settings & Assumptions"),
+        ("Charts",       "Charts & Visualisations"),
     ]
     for i, (sheet, label) in enumerate(sheets):
         ws.write_url(f"A{9+i}", f"internal:'{sheet}'!A1", sty.cover_link, label)
@@ -1000,18 +1005,65 @@ def build_workbook(financial_data: FinancialData, output_path: Optional[str] = N
         build_wacc_sheet,
     )
     from agents.charts_builder import build_charts_sheet
+    from agents.new_sheets_builder import (
+        build_beta_regression_sheet,
+        build_common_size_sheet,
+        build_dupont_sheet,
+        build_forecasting_sheet,
+        build_var_simulation_sheet,
+    )
 
+    # ── Fetch yfinance data (non-fatal) ───────────────────────────────────────
+    weekly_stock = None
+    weekly_nifty = None
+    daily_stock  = None
+    ticker_str   = financial_data.ticker
+
+    if ticker_str:
+        try:
+            import yfinance as yf
+
+            # Normalise to NSE ticker if no suffix
+            if not any(ticker_str.upper().endswith(s) for s in (".NS", ".BO", ".BSE")):
+                ticker_str = ticker_str + ".NS"
+
+            log.info(f"Fetching yfinance data for {ticker_str}")
+            weekly_stock = yf.download(ticker_str, period="2y", interval="1wk",
+                                       progress=False, auto_adjust=True)
+            weekly_nifty = yf.download("^NSEI",    period="2y", interval="1wk",
+                                       progress=False, auto_adjust=True)
+            daily_stock  = yf.download(ticker_str, period="2y", interval="1d",
+                                       progress=False, auto_adjust=True)
+
+            if weekly_stock.empty or weekly_nifty.empty:
+                log.warning(f"yfinance returned empty data for {ticker_str}")
+                weekly_stock = weekly_nifty = daily_stock = None
+        except Exception as exc:
+            log.warning(f"yfinance fetch failed ({ticker_str}): {exc}")
+            weekly_stock = weekly_nifty = daily_stock = None
+
+    # ── Build sheets ──────────────────────────────────────────────────────────
     _build_cover(wb, sty, financial_data.company_name, years)
     _build_is(wb, sty, income_stmts, years)
     _build_bs(wb, sty, balance_sheets, years)
     _build_cf(wb, sty, cash_flows, years)
+    build_common_size_sheet(wb, sty, years)
     _build_ratios(wb, sty, years)
-    _build_verification(wb, sty, years)
-    _build_settings(wb, sty)
+    build_forecasting_sheet(wb, sty, years, income_stmts)
+    build_beta_regression_sheet(wb, sty, years,
+                                ticker=ticker_str,
+                                weekly_stock=weekly_stock,
+                                weekly_nifty=weekly_nifty)
     build_wacc_sheet(wb, sty, years)
     build_dcf_sheet(wb, sty, years)
     build_ddm_sheet(wb, sty, years)
     build_comps_sheet(wb, sty, years)
+    build_var_simulation_sheet(wb, sty, years,
+                               ticker=ticker_str,
+                               daily_stock=daily_stock)
+    build_dupont_sheet(wb, sty, years)
+    _build_verification(wb, sty, years)
+    _build_settings(wb, sty)
     build_charts_sheet(wb, sty, years)
 
     wb.close()

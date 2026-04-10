@@ -4,16 +4,21 @@ FastAPI web server — Financial Analysis AI
 Routes
 ------
 GET  /                             Serve the upload UI
-POST /analyze                      Start a background analysis job
-GET  /status/{job_id}              Poll job status and progress
+POST /analyze                      Start a background analysis job  (10/min rate limit)
+GET  /status/{job_id}              Poll job status and progress (falls back to SQLite)
 GET  /download/{job_id}/report     Download the generated Word report
 GET  /download/{job_id}/excel      Download the generated Excel workbook
 POST /chat/{job_id}                Chatbot: answer questions about the report
+POST /compare                      Two-company comparison chat (requires auth)
 POST /auto-detect                  Detect company name + fiscal years from an uploaded file
 POST /upload-chunk                 Upload a file chunk (resumable multipart upload)
 POST /upload-finalize/{upload_id}  Assemble chunks and return the combined file path
-GET  /history                      List all completed analyses (from SQLite, with filters)
+GET  /history                      List analyses (filtered by authenticated user when token present)
 GET  /history/{job_id}             Full detail for a past analysis
+DELETE /history/{job_id}           Delete a job record
+GET  /auth/google                  Redirect to Google OAuth consent page
+GET  /auth/callback                Google OAuth callback → issue JWT → redirect to frontend
+GET  /auth/me                      Return current user info from JWT
 GET  /health                       Health check
 """
 import asyncio
@@ -25,10 +30,23 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 import anthropic
-from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi import (
+    BackgroundTasks,
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Request,
+    UploadFile,
+)
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -40,11 +58,29 @@ from config.settings import (
     MODEL_NAME,
 )
 from errors import AnalysisError, ExtractionError, ReportError, ValidationError
-from web.db import delete_job, get_job_detail, init_db, list_jobs, upsert_job, upsert_report
+from web.auth import (
+    build_google_auth_url,
+    create_jwt,
+    exchange_code_for_user,
+    get_current_user,
+    get_optional_user,
+    google_auth_enabled,
+)
+from web.db import (
+    delete_job,
+    get_job_detail,
+    init_db,
+    list_jobs,
+    recover_stuck_jobs,
+    upsert_job,
+    upsert_report,
+    upsert_user,
+)
 from web.jobs import Job, create_job, get_job
 
 # ── Bootstrap DB ──────────────────────────────────────────────────────────────
 init_db()
+_recovered = recover_stuck_jobs()
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 UPLOADS_DIR = Path(__file__).parent / "uploads"
@@ -52,7 +88,6 @@ UPLOADS_DIR.mkdir(exist_ok=True)
 CHUNKS_DIR = Path(__file__).parent / "uploads" / "chunks"
 CHUNKS_DIR.mkdir(exist_ok=True)
 
-# Chunked upload: 1 GB per file (server assembles from chunks)
 MAX_UPLOAD_SIZE_CHUNKED = 1024 * 1024 * 1024  # 1 GB
 
 COMMENTARY_SECTIONS: Dict[str, str] = {
@@ -65,8 +100,36 @@ COMMENTARY_SECTIONS: Dict[str, str] = {
     "key_strengths":          "Key Strengths",
 }
 
+# ── Rate limiter ──────────────────────────────────────────────────────────────
+limiter = Limiter(key_func=get_remote_address)
+
 # ── App ───────────────────────────────────────────────────────────────────────
-app = FastAPI(title="Financial Analysis AI", version="2.0")
+app = FastAPI(title="FinAnalyse API", version="2.0")
+
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# ── CORS ──────────────────────────────────────────────────────────────────────
+import os as _os
+
+_ALLOWED_ORIGINS = [
+    o.strip()
+    for o in _os.getenv(
+        "CORS_ORIGINS",
+        "http://localhost:3000,http://localhost:8000,https://finanalyse-frontend-in.hack.nurixlabs.tech",
+    ).split(",")
+    if o.strip()
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ── Static files ──────────────────────────────────────────────────────────────
 app.mount(
     "/static",
     StaticFiles(directory=Path(__file__).parent / "static"),
@@ -87,6 +150,61 @@ def health() -> Dict[str, str]:
 async def index() -> HTMLResponse:
     html_path = Path(__file__).parent / "static" / "index.html"
     return HTMLResponse(html_path.read_text(encoding="utf-8"))
+
+
+# ── Auth routes ───────────────────────────────────────────────────────────────
+
+@app.get("/auth/google")
+async def auth_google() -> RedirectResponse:
+    """Redirect to Google OAuth consent page."""
+    if not google_auth_enabled():
+        raise HTTPException(503, "Google OAuth is not configured on this server")
+    return RedirectResponse(build_google_auth_url())
+
+
+@app.get("/auth/callback")
+async def auth_callback(code: str = "", error: str = "") -> RedirectResponse:
+    """
+    Google redirects here after user grants consent.
+    Exchanges the code, upserts the user, issues a JWT, and redirects to
+    the frontend with  ?token=<jwt>  as a query parameter.
+    """
+    from web.auth import FRONTEND_URL
+
+    if error:
+        return RedirectResponse(f"{FRONTEND_URL}?auth_error={error}")
+    if not code:
+        return RedirectResponse(f"{FRONTEND_URL}?auth_error=missing_code")
+
+    try:
+        user_info = await exchange_code_for_user(code)
+    except Exception as exc:
+        return RedirectResponse(f"{FRONTEND_URL}?auth_error=google_api_failed")
+
+    user_id = upsert_user(
+        google_id=user_info["google_id"],
+        email=user_info["email"],
+        name=user_info["name"],
+        picture=user_info["picture"],
+    )
+
+    token = create_jwt(user_id, user_info["email"])
+    return RedirectResponse(f"{FRONTEND_URL}?token={token}")
+
+
+@app.get("/auth/me")
+async def auth_me(current_user: dict = Depends(get_current_user)) -> JSONResponse:
+    """Return basic profile for the authenticated user."""
+    from web.db import get_user_by_id
+    user = get_user_by_id(current_user["user_id"])
+    if not user:
+        raise HTTPException(404, "User not found")
+    # Never return internal DB ids; expose only safe fields
+    return JSONResponse({
+        "email":   user["email"],
+        "name":    user["name"],
+        "picture": user["picture"],
+    })
 
 
 # ── Year-range parser ─────────────────────────────────────────────────────────
@@ -133,10 +251,9 @@ async def auto_detect(file: UploadFile = File(...)) -> JSONResponse:
 
     if filename.endswith(".json"):
         try:
-            data = json.loads(content.decode("utf-8"))
+            data    = json.loads(content.decode("utf-8"))
             company = data.get("company_name", "")
             years   = data.get("fiscal_years") or []
-            # also harvest from statement arrays
             if not years:
                 for key in ("income_statements", "balance_sheets", "cash_flow_statements"):
                     for stmt in data.get(key, []):
@@ -153,9 +270,22 @@ async def auto_detect(file: UploadFile = File(...)) -> JSONResponse:
             return JSONResponse({"company_name": "", "fiscal_years": []})
         try:
             import base64
-            b64 = base64.b64encode(content).decode()
+            import io
+            from pypdf import PdfReader, PdfWriter
+            # Truncate to first 5 pages to reduce tokens and latency
+            try:
+                reader = PdfReader(io.BytesIO(content))
+                writer = PdfWriter()
+                for i in range(min(5, len(reader.pages))):
+                    writer.add_page(reader.pages[i])
+                buf = io.BytesIO()
+                writer.write(buf)
+                content = buf.getvalue()
+            except Exception:
+                pass  # fall back to full PDF if truncation fails
+            b64    = base64.b64encode(content).decode()
             client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-            resp = client.messages.create(
+            resp   = client.messages.create(
                 model=MODEL_NAME,
                 max_tokens=256,
                 messages=[{
@@ -221,21 +351,20 @@ async def upload_chunk(
     data = await chunk.read()
     part_path.write_bytes(data)
 
-    # Count how many parts have arrived
     received = len(list(upload_dir.glob("*.part")))
     return JSONResponse({
-        "upload_id":     upload_id,
-        "chunk_index":   chunk_index,
-        "received":      received,
-        "total_chunks":  total_chunks,
-        "complete":      received >= total_chunks,
+        "upload_id":    upload_id,
+        "chunk_index":  chunk_index,
+        "received":     received,
+        "total_chunks": total_chunks,
+        "complete":     received >= total_chunks,
     })
 
 
 @app.post("/upload-finalize/{upload_id}")
 async def upload_finalize(
-    upload_id: str,
-    filename:  str = Form(...),
+    upload_id:    str,
+    filename:     str = Form(...),
     total_chunks: int = Form(...),
 ) -> JSONResponse:
     """
@@ -246,24 +375,22 @@ async def upload_finalize(
     if not upload_dir.exists():
         raise HTTPException(404, f"No chunks found for upload_id={upload_id}")
 
-    parts = [upload_dir / f"{i}.part" for i in range(total_chunks)]
+    parts   = [upload_dir / f"{i}.part" for i in range(total_chunks)]
     missing = [str(p) for p in parts if not p.exists()]
     if missing:
         raise HTTPException(400, f"Missing {len(missing)} chunk(s). Upload incomplete.")
 
     safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", Path(filename).name)
-    out_path   = UPLOADS_DIR / f"{upload_id}_{safe_name}"
+    out_path  = UPLOADS_DIR / f"{upload_id}_{safe_name}"
 
     with out_path.open("wb") as fout:
         for part in parts:
             fout.write(part.read_bytes())
 
-    # Verify assembled size ≤ 1 GB
     if out_path.stat().st_size > MAX_UPLOAD_SIZE_CHUNKED:
         out_path.unlink(missing_ok=True)
         raise HTTPException(413, "Assembled file exceeds the 1 GB upload limit.")
 
-    # Clean up chunk directory
     for part in parts:
         part.unlink(missing_ok=True)
     try:
@@ -282,14 +409,17 @@ async def upload_finalize(
 # ── Start Analysis Job ────────────────────────────────────────────────────────
 
 @app.post("/analyze")
+@limiter.limit("10/minute")
 async def analyze(
+    request:          Request,
     background_tasks: BackgroundTasks,
     files:            List[UploadFile] = File(default=[]),
-    pre_uploaded:     str              = Form(""),   # JSON array of paths from /upload-finalize
+    pre_uploaded:     str              = Form(""),
     company:          str              = Form(""),
     years:            str              = Form(""),
     currency:         str              = Form("INR"),
     unit:             str              = Form("Crores"),
+    current_user:     Optional[dict]   = Depends(get_optional_user),
 ) -> JSONResponse:
     job           = create_job()
     saved_paths:   List[str]  = []
@@ -302,7 +432,7 @@ async def analyze(
         except Exception:
             raise HTTPException(400, "pre_uploaded must be a JSON array of file paths")
         for p in paths:
-            fp = Path(p)
+            fp  = Path(p)
             if not fp.exists():
                 raise HTTPException(400, f"Pre-uploaded file not found: {p}")
             ext = fp.suffix.lower()
@@ -319,13 +449,18 @@ async def analyze(
 
         if not (is_json or is_pdf):
             raise HTTPException(
-                400, f"Unsupported file type: '{filename}'. Only .pdf or .json are accepted."
+                400,
+                f"Unsupported file type: '{filename}'. Only .pdf or .json are accepted.",
             )
 
         content = await file.read()
         if len(content) > MAX_UPLOAD_SIZE_BYTES:
             size_mb = MAX_UPLOAD_SIZE_BYTES // (1024 * 1024)
-            raise HTTPException(400, f"'{filename}' exceeds the {size_mb} MB direct upload limit. Use chunked upload for larger files.")
+            raise HTTPException(
+                400,
+                f"'{filename}' exceeds the {size_mb} MB direct upload limit. "
+                "Use chunked upload for larger files.",
+            )
 
         suffix     = ".json" if is_json else ".pdf"
         idx        = len(saved_paths)
@@ -340,11 +475,8 @@ async def analyze(
     if len(saved_paths) > MAX_UPLOAD_FILES:
         raise HTTPException(400, f"Maximum {MAX_UPLOAD_FILES} files per request.")
 
-    has_pdf = any(not j for j in is_json_flags)
-    if has_pdf and not company.strip():
-        raise HTTPException(400, "Company name is required for PDF uploads.")
+    # company name is optional - pipeline will detect it from the PDF if not provided
 
-    # Parse flexible year input
     fiscal_years: List[int] = []
     if years.strip():
         try:
@@ -353,10 +485,11 @@ async def analyze(
             raise HTTPException(
                 400,
                 "Years must be comma-separated integers or ranges, "
-                "e.g. 2022,2023,2024 or 2016-2025 or 2016-2020,2022-2025"
+                "e.g. 2022,2023,2024 or 2016-2025 or 2016-2020,2022-2025",
             )
 
-    # Persist job to DB immediately (status=queued)
+    user_id = current_user["user_id"] if current_user else None
+
     upsert_job(
         job_id=job.id,
         status="queued",
@@ -365,6 +498,7 @@ async def analyze(
         unit=unit,
         fiscal_years=fiscal_years,
         created_at=job.created_at,
+        user_id=user_id,
     )
 
     background_tasks.add_task(
@@ -376,6 +510,7 @@ async def analyze(
         fiscal_years=fiscal_years,
         currency=currency,
         unit=unit,
+        user_id=user_id,
     )
     return JSONResponse({"job_id": job.id})
 
@@ -390,12 +525,13 @@ async def _run_pipeline(
     fiscal_years:  List[int],
     currency:      str,
     unit:          str,
+    user_id:       Optional[str] = None,
 ) -> None:
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(
         None,
         _run_pipeline_sync,
-        job, file_paths, is_json_flags, company, fiscal_years, currency, unit,
+        job, file_paths, is_json_flags, company, fiscal_years, currency, unit, user_id,
     )
 
 
@@ -407,11 +543,14 @@ def _run_pipeline_sync(
     fiscal_years:  List[int],
     currency:      str,
     unit:          str,
+    user_id:       Optional[str] = None,
 ) -> None:
     job.status = "running"
-    upsert_job(job_id=job.id, status="running", company_name=company,
-               currency=currency, unit=unit, fiscal_years=fiscal_years,
-               created_at=job.created_at)
+    upsert_job(
+        job_id=job.id, status="running", company_name=company,
+        currency=currency, unit=unit, fiscal_years=fiscal_years,
+        created_at=job.created_at, user_id=user_id,
+    )
 
     try:
         financial_data = _step_extract(
@@ -429,7 +568,6 @@ def _run_pipeline_sync(
         job.status       = "done"
         job.finished_at  = datetime.now().isoformat()
 
-        # Persist to SQLite
         upsert_job(
             job_id=job.id, status="done",
             company_name=financial_data.company_name,
@@ -438,6 +576,7 @@ def _run_pipeline_sync(
             fiscal_years=financial_data.sorted_years(),
             created_at=job.created_at,
             finished_at=job.finished_at,
+            user_id=user_id,
         )
         upsert_report(
             job_id=job.id,
@@ -518,13 +657,17 @@ def _step_excel(job: Job, financial_data) -> Optional[str]:
         excel_path: str = build_workbook(financial_data)
         job.log("excel", f"Excel model built — {Path(excel_path).name}", done=True)
         return excel_path
-    except Exception as exc:  # Excel failure is non-fatal
+    except Exception as exc:
         job.log("excel", f"Excel skipped: {str(exc)[:120]}", done=True)
         return None
 
 
-def _step_report(job: Job, financial_data, commentary: Dict[str, str],
-                 excel_path: Optional[str] = None) -> str:
+def _step_report(
+    job: Job,
+    financial_data,
+    commentary: Dict[str, str],
+    excel_path: Optional[str] = None,
+) -> str:
     from agents.report_generator import generate_report
     job.log("report", "Building Word report…")
     report_path: str = generate_report(financial_data, commentary, excel_path=excel_path)
@@ -575,17 +718,39 @@ def _cleanup_uploads(file_paths: List[str]) -> None:
 
 @app.get("/status/{job_id}")
 def status(job_id: str) -> JSONResponse:
+    """
+    Return job status. Checks in-memory store first; falls back to SQLite
+    so that completed jobs survive pod restarts.
+    """
     job = get_job(job_id)
-    if not job:
+    if job:
+        return JSONResponse(job.to_dict())
+
+    # Pod-restart fallback: reconstruct a minimal status response from SQLite
+    detail = get_job_detail(job_id)
+    if not detail:
         raise HTTPException(404, "Job not found")
-    return JSONResponse(job.to_dict())
+
+    return JSONResponse({
+        "id":           detail["id"],
+        "status":       detail["status"],
+        "progress":     [],   # ephemeral; not persisted
+        "files": {
+            "report": bool(detail.get("report_path")),
+            "excel":  bool(detail.get("excel_path")),
+        },
+        "error":        detail.get("error"),
+        "next_steps":   detail.get("next_steps") or [],
+        "company_name": detail.get("company_name", ""),
+        "created_at":   detail.get("created_at"),
+        "finished_at":  detail.get("finished_at"),
+    })
 
 
 # ── Download Files ────────────────────────────────────────────────────────────
 
 @app.get("/download/{job_id}/report")
 def download_report(job_id: str) -> FileResponse:
-    # Check in-memory store first, then DB
     job = get_job(job_id)
     if job and job.status == "done":
         path = job.files.get("report")
@@ -631,18 +796,26 @@ def download_excel(job_id: str) -> FileResponse:
 
 @app.get("/history")
 def history(
-    limit:     int           = 50,
-    offset:    int           = 0,
-    status:    Optional[str] = None,
-    company:   Optional[str] = None,
-    year_from: Optional[int] = None,
-    year_to:   Optional[int] = None,
+    request:      Request,
+    limit:        int            = 50,
+    offset:       int            = 0,
+    status:       Optional[str]  = None,
+    company:      Optional[str]  = None,
+    year_from:    Optional[int]  = None,
+    year_to:      Optional[int]  = None,
+    current_user: Optional[dict] = Depends(get_optional_user),
 ) -> JSONResponse:
-    """List analyses from the database, newest first. Supports filters."""
+    """
+    List analyses newest-first with optional filters.
+    When an authenticated user makes the request, returns only their jobs.
+    Unauthenticated requests return all jobs (demo mode).
+    """
+    user_id = current_user["user_id"] if current_user else None
     return JSONResponse(list_jobs(
         limit=limit, offset=offset,
         status=status, company=company,
         year_from=year_from, year_to=year_to,
+        user_id=user_id,
     ))
 
 
@@ -663,7 +836,7 @@ def delete_report(job_id: str) -> JSONResponse:
     return JSONResponse({"deleted": True})
 
 
-# ── Chatbot ───────────────────────────────────────────────────────────────────
+# ── Single-company Chatbot ────────────────────────────────────────────────────
 
 class _ChatMessage(BaseModel):
     role:    str
@@ -677,7 +850,7 @@ class _ChatRequest(BaseModel):
 
 @app.post("/chat/{job_id}")
 def chat(job_id: str, body: _ChatRequest) -> JSONResponse:
-    # Support chatting about historical (DB-stored) jobs too
+    """Answer questions grounded in the AI commentary for a single completed job."""
     job = get_job(job_id)
     if job and job.status == "done":
         commentary   = job.commentary
@@ -719,3 +892,81 @@ def chat(job_id: str, body: _ChatRequest) -> JSONResponse:
         messages=messages,
     )
     return JSONResponse({"reply": response.content[0].text})
+
+
+# ── Two-company Comparison Chat ───────────────────────────────────────────────
+
+class _CompareRequest(BaseModel):
+    """
+    /compare body:
+      job_ids — exactly 2 completed job IDs to compare
+      message — user's question about the two companies
+      history — conversation history (role/content pairs)
+    """
+    job_ids: List[str]
+    message: str
+    history: List[_ChatMessage] = []
+
+
+@app.post("/compare")
+def compare(body: _CompareRequest) -> JSONResponse:
+    """
+    Answer questions that compare two completed analyses side-by-side.
+
+    Builds a combined context from both jobs' commentary (~6 K tokens total)
+    and sends it to Claude as the system prompt. No RAG — direct injection is
+    sufficient for 2 companies at this scale.
+    """
+    if len(body.job_ids) != 2:
+        raise HTTPException(400, "Exactly 2 job_ids are required for comparison")
+    if not ANTHROPIC_API_KEY:
+        raise HTTPException(503, "ANTHROPIC_API_KEY is not configured on this server")
+
+    analyses = []
+    for job_id in body.job_ids:
+        job = get_job(job_id)
+        if job and job.status == "done":
+            commentary   = job.commentary
+            company_name = job.company_name
+        else:
+            detail = get_job_detail(job_id)
+            if not detail or detail.get("status") != "done":
+                raise HTTPException(404, f"Analysis {job_id!r} not found or not yet complete")
+            commentary   = detail.get("commentary") or {}
+            company_name = detail.get("company_name", "Unknown")
+
+        if not commentary:
+            raise HTTPException(400, f"No analysis context available for job {job_id!r}")
+
+        context = "\n\n".join(
+            f"#### {label}\n{commentary[key]}"
+            for key, label in COMMENTARY_SECTIONS.items()
+            if key in commentary and commentary[key]
+        )
+        analyses.append({"name": company_name, "context": context})
+
+    system_prompt = (
+        "You are a senior equity analyst. You have two AI-generated financial analyses "
+        "below. Answer the user's comparative questions using only the analyses provided. "
+        "Be concise, precise, and cite specific figures where relevant.\n\n"
+        f"=== COMPANY 1: {analyses[0]['name']} ===\n"
+        f"{analyses[0]['context']}\n\n"
+        f"=== COMPANY 2: {analyses[1]['name']} ===\n"
+        f"{analyses[1]['context']}\n\n"
+        "=== END OF ANALYSES ==="
+    )
+
+    messages = [{"role": m.role, "content": m.content} for m in body.history]
+    messages.append({"role": "user", "content": body.message})
+
+    client   = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    response = client.messages.create(
+        model=MODEL_NAME,
+        max_tokens=1024,
+        system=system_prompt,
+        messages=messages,
+    )
+    return JSONResponse({
+        "reply":    response.content[0].text,
+        "companies": [a["name"] for a in analyses],
+    })

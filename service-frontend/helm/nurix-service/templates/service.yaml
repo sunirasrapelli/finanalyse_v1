@@ -1,0 +1,30 @@
+{{- if .Values.service.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "nurix-service.serviceName" . }}
+  namespace: {{ .Values.namespace.name | default .Release.Namespace }}
+  labels:
+    {{- include "nurix-service.labels" . | nindent 4 }}
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: {{ .Values.service.targetPort }}
+      protocol: TCP
+      name: http
+    {{- if .Values.serviceMonitor.enabled }}
+    {{- with (index .Values.serviceMonitor.endpoints 0) }}
+    - port: {{ .servicePort }}
+      targetPort: {{ .targetPort }}
+      protocol: {{ .scheme | upper }}
+      name: {{ .port }}
+    {{- end }}
+    {{- end }}
+  selector:
+    {{- include "nurix-service.selectorLabels" . | nindent 4 }}
+{{- end }}

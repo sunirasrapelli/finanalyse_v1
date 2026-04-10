@@ -1,0 +1,24 @@
+{{- if .Values.keda.enabled }}
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ include "nurix-service.fullname" . }}-scaler
+  namespace: {{ .Values.namespace.name | default .Release.Namespace }}
+  labels:
+    {{- include "nurix-service.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    name: {{ include "nurix-service.fullname" . }}
+  minReplicaCount: {{ .Values.keda.minReplicas }}
+  maxReplicaCount: {{ .Values.keda.maxReplicas }}
+  
+  {{- if .Values.keda.triggers }}
+  triggers:
+    {{- toYaml .Values.keda.triggers | nindent 4 }}
+  {{- end }}
+  
+  {{- if .Values.keda.advanced }}
+  advanced:
+    {{- toYaml .Values.keda.advanced | nindent 4 }}
+  {{- end }}
+{{- end }}

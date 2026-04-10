@@ -1,0 +1,38 @@
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+venv/
+.venv/
+*.egg-info/
+
+# Node
+node_modules/
+.next/
+out/
+build/
+
+# Outputs / uploads (runtime data)
+service-backend/src/outputs/
+service-backend/src/web/uploads/
+
+# macOS
+.DS_Store
+
+# Logs
+*.log
+
+# Reference / demo files (large binaries)
+reference_docs/
+
+# Editor
+.idea/
+.vscode/
+*.swp
