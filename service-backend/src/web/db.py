@@ -77,6 +77,7 @@ def init_db() -> None:
     # ── Migrations for pre-existing databases ────────────────────────────────
     _safe_alter("ALTER TABLE reports ADD COLUMN excel_path TEXT")
     _safe_alter("ALTER TABLE jobs    ADD COLUMN user_id TEXT REFERENCES users(id)")
+    _safe_alter("ALTER TABLE reports ADD COLUMN metrics TEXT")
 
     con.commit()
 
@@ -184,10 +185,10 @@ def upsert_job(
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             status       = excluded.status,
-            company_name = excluded.company_name,
-            currency     = excluded.currency,
-            unit         = excluded.unit,
-            fiscal_years = excluded.fiscal_years,
+            company_name = CASE WHEN excluded.company_name != '' THEN excluded.company_name ELSE jobs.company_name END,
+            currency     = CASE WHEN excluded.currency     != '' THEN excluded.currency     ELSE jobs.currency     END,
+            unit         = CASE WHEN excluded.unit         != '' THEN excluded.unit         ELSE jobs.unit         END,
+            fiscal_years = CASE WHEN excluded.fiscal_years != '[]' THEN excluded.fiscal_years ELSE jobs.fiscal_years END,
             error        = excluded.error,
             finished_at  = excluded.finished_at,
             user_id      = COALESCE(excluded.user_id, jobs.user_id)
@@ -210,17 +211,19 @@ def upsert_report(
     commentary:  Dict[str, str],
     next_steps:  List[Dict[str, str]],
     excel_path:  Optional[str] = None,
+    metrics:     Optional[Dict] = None,
 ) -> None:
     con = _conn()
     con.execute(
         """
-        INSERT INTO reports (job_id, report_path, excel_path, commentary, next_steps)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO reports (job_id, report_path, excel_path, commentary, next_steps, metrics)
+        VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(job_id) DO UPDATE SET
             report_path = excluded.report_path,
             excel_path  = excluded.excel_path,
             commentary  = excluded.commentary,
-            next_steps  = excluded.next_steps
+            next_steps  = excluded.next_steps,
+            metrics     = excluded.metrics
         """,
         (
             job_id,
@@ -228,6 +231,7 @@ def upsert_report(
             excel_path,
             json.dumps(commentary),
             json.dumps(next_steps),
+            json.dumps(metrics) if metrics is not None else None,
         ),
     )
     con.commit()
@@ -262,13 +266,15 @@ def list_jobs(
         where_clauses.append("j.fiscal_years LIKE ?")
         params.append(f"%{year_to}%")
     if user_id is not None:
-        where_clauses.append("j.user_id = ?")
+        # Show the user's own jobs AND any unclaimed (anonymous) jobs so that
+        # analyses run before login are still visible after authenticating.
+        where_clauses.append("(j.user_id = ? OR j.user_id IS NULL)")
         params.append(user_id)
 
     where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
     rows = con.execute(
         f"""
-        SELECT j.id, j.status, j.company_name, j.currency, j.unit,
+        SELECT j.id, j.id AS job_id, j.status, j.company_name, j.currency, j.unit,
                j.fiscal_years, j.error, j.created_at, j.finished_at, j.user_id,
                r.report_path, r.excel_path
         FROM   jobs j
@@ -283,13 +289,13 @@ def list_jobs(
 
 
 def get_job_detail(job_id: str) -> Optional[Dict[str, Any]]:
-    """Return full job + report detail including commentary and next_steps."""
+    """Return full job + report detail including commentary, next_steps, and metrics."""
     con = _conn()
     row = con.execute(
         """
-        SELECT j.id, j.status, j.company_name, j.currency, j.unit,
+        SELECT j.id, j.id AS job_id, j.status, j.company_name, j.currency, j.unit,
                j.fiscal_years, j.error, j.created_at, j.finished_at, j.user_id,
-               r.report_path, r.excel_path, r.commentary, r.next_steps
+               r.report_path, r.excel_path, r.commentary, r.next_steps, r.metrics
         FROM   jobs j
         LEFT JOIN reports r ON r.job_id = j.id
         WHERE  j.id = ?
@@ -303,6 +309,8 @@ def get_job_detail(job_id: str) -> Optional[Dict[str, Any]]:
         d["commentary"] = json.loads(d["commentary"])
     if d.get("next_steps") and isinstance(d["next_steps"], str):
         d["next_steps"] = json.loads(d["next_steps"])
+    if d.get("metrics") and isinstance(d["metrics"], str):
+        d["metrics"] = json.loads(d["metrics"])
     return d
 
 

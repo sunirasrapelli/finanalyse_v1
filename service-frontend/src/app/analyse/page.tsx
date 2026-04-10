@@ -5,7 +5,9 @@ import {
   useCallback,
   useEffect,
   useRef,
+  Suspense,
 } from 'react'
+import { useSearchParams } from 'next/navigation'
 import Link from 'next/link'
 import Image from 'next/image'
 import {
@@ -27,13 +29,16 @@ import {
   DollarSign,
   PieChart,
 } from 'lucide-react'
+import ReactMarkdown from 'react-markdown'
 import {
   startAnalysis,
   pollStatus,
   getDownloadUrl,
   sendChat,
   autoDetect,
+  getJobDetail,
   type JobStatus,
+  type JobMetrics,
   type ChatMessage,
 } from '@/lib/api'
 import { getGoogleAuthUrl } from '@/lib/api'
@@ -219,7 +224,7 @@ const FileUpload = ({
           <div className="upload-pulse" />
         </div>
         <p className="upload-text">Click to upload or drag &amp; drop</p>
-        <p className="upload-hint">PDF - JSON - Up to 1 GB per file</p>
+        <p className="upload-hint">PDF - JSON - Up to 50 MB per file</p>
       </div>
 
       {files.length > 0 && (
@@ -464,6 +469,32 @@ const PipelineProgress = ({ status }: { status: JobStatus | null }) => {
 // =====================================================
 // Analysis Header (results)
 // =====================================================
+
+/** Pull last non-null entry from a nullable array. */
+function lastVal(arr: (number | null)[] | undefined): number | null {
+  if (!arr) return null
+  for (let i = arr.length - 1; i >= 0; i--) {
+    if (arr[i] !== null && arr[i] !== undefined) return arr[i] as number
+  }
+  return null
+}
+
+/** Strip nulls; return at least a 2-point flat line for sparkline rendering. */
+function sparkData(arr: (number | null)[] | undefined): number[] {
+  const filtered = (arr ?? []).filter((v): v is number => v !== null && v !== undefined)
+  return filtered.length >= 2 ? filtered : [0, 0]
+}
+
+function currencySymbol(currency: string | undefined): string {
+  const map: Record<string, string> = { USD: '$', INR: '\u20B9', EUR: '\u20AC', GBP: '\u00A3' }
+  return map[currency ?? ''] ?? ''
+}
+
+function unitSuffix(unit: string | undefined): string {
+  const map: Record<string, string> = { Millions: 'M', Crores: 'Cr', Billions: 'B' }
+  return map[unit ?? ''] ?? ''
+}
+
 const AnalysisHeader = ({
   status,
   jobId,
@@ -474,6 +505,14 @@ const AnalysisHeader = ({
   const companyName = status.company_name || 'Analysis'
   const reportUrl = getDownloadUrl(jobId, 'report')
   const excelUrl = getDownloadUrl(jobId, 'excel')
+  const m: JobMetrics | null | undefined = status.metrics
+  const sym  = currencySymbol(status.currency)
+  const unit = unitSuffix(status.unit)
+
+  const grossMargin = lastVal(m?.gross_margin_pct)
+  const fcf         = lastVal(m?.fcf)
+  const de          = lastVal(m?.debt_equity)
+  const revenue     = lastVal(m?.revenue)
 
   return (
     <div className="analysis-header animate-on-scroll visible">
@@ -491,31 +530,39 @@ const AnalysisHeader = ({
       <div className="quick-stats">
         <div className="stat-item">
           <span className="stat-value">
-            <AnimatedCounter value={60.1} suffix="%" decimals={1} />
+            {grossMargin !== null
+              ? <AnimatedCounter value={grossMargin} suffix="%" decimals={1} />
+              : <span style={{ color: 'var(--text-muted)' }}>--</span>}
           </span>
           <span className="stat-label">Gross Margin</span>
-          <Sparkline data={[55, 57, 58, 56, 59, 60.1]} color="var(--accent-green)" height={28} />
+          <Sparkline data={sparkData(m?.gross_margin_pct)} color="var(--accent-green)" height={28} />
         </div>
         <div className="stat-item">
           <span className="stat-value">
-            <AnimatedCounter value={3.63} prefix="$" suffix="B" decimals={2} />
+            {fcf !== null
+              ? <AnimatedCounter value={fcf} prefix={sym} suffix={` ${unit}`} decimals={0} />
+              : <span style={{ color: 'var(--text-muted)' }}>--</span>}
           </span>
           <span className="stat-label">Free Cash Flow</span>
-          <Sparkline data={[2.8, 3.1, 2.9, 3.4, 3.2, 3.63]} color="var(--accent-green)" height={28} />
+          <Sparkline data={sparkData(m?.fcf)} color="var(--accent-green)" height={28} />
         </div>
-        <div className="stat-item negative">
+        <div className={`stat-item${de !== null && de > 2 ? ' negative' : ''}`}>
           <span className="stat-value">
-            <AnimatedCounter value={21.9} suffix="x" decimals={1} />
+            {de !== null
+              ? <AnimatedCounter value={de} suffix="x" decimals={1} />
+              : <span style={{ color: 'var(--text-muted)' }}>--</span>}
           </span>
           <span className="stat-label">Debt/Equity</span>
-          <Sparkline data={[12, 14, 16, 18, 20, 21.9]} color="var(--accent-orange)" height={28} />
+          <Sparkline data={sparkData(m?.debt_equity)} color={de !== null && de > 2 ? 'var(--accent-orange)' : 'var(--accent-green)'} height={28} />
         </div>
         <div className="stat-item">
           <span className="stat-value">
-            <AnimatedCounter value={20.38} prefix="$" suffix="B" decimals={2} />
+            {revenue !== null
+              ? <AnimatedCounter value={revenue} prefix={sym} suffix={` ${unit}`} decimals={0} />
+              : <span style={{ color: 'var(--text-muted)' }}>--</span>}
           </span>
           <span className="stat-label">Revenue</span>
-          <Sparkline data={[18.5, 19.2, 19.8, 20.1, 20.1, 20.38]} color="var(--accent-purple)" height={28} />
+          <Sparkline data={sparkData(m?.revenue)} color="var(--accent-purple)" height={28} />
         </div>
       </div>
 
@@ -764,7 +811,9 @@ const ChatWidget = ({ jobId }: { jobId: string }) => {
                 <div className="chat-avatar">
                   {msg.role === 'user' ? 'U' : 'AI'}
                 </div>
-                <div className="chat-bubble">{msg.content}</div>
+                <div className="chat-bubble chat-bubble-md">
+                  <ReactMarkdown>{msg.content}</ReactMarkdown>
+                </div>
               </div>
             ))}
             {sending && (
@@ -917,7 +966,8 @@ const DotMatrix = () => {
 // =====================================================
 type PageState = 'idle' | 'running' | 'done' | 'error'
 
-export default function AnalysePage() {
+function AnalysePageInner() {
+  const searchParams = useSearchParams()
   const [files, setFiles] = useState<FileItem[]>([])
   const [config, setConfig] = useState<Config>({
     companyName: '',
@@ -935,6 +985,48 @@ export default function AnalysePage() {
   const [jobStatus, setJobStatus] = useState<JobStatus | null>(null)
   const [errorMsg, setErrorMsg] = useState('')
   const pollRef = useRef<NodeJS.Timeout | null>(null)
+
+  // Restore a previous analysis when navigated from the Reports eye icon
+  useEffect(() => {
+    const fromJobId = searchParams.get('job_id')
+    if (!fromJobId) return
+    setPageState('running')
+
+    // Use getJobDetail (history endpoint) first - it always reads from SQLite
+    // and returns company_name/currency/unit reliably for completed jobs.
+    // Fall back to pollStatus for jobs that are still running in-memory.
+    getJobDetail(fromJobId)
+      .then((status) => {
+        setJobId(fromJobId)
+        setJobStatus(status)
+        if (status.status === 'done') {
+          setPageState('done')
+        } else if (status.status === 'error') {
+          setErrorMsg(status.error || status.error_message || 'This analysis failed.')
+          setPageState('error')
+        } else {
+          // Still running - switch to live polling
+          pollRef.current = setInterval(async () => {
+            try {
+              const s = await pollStatus(fromJobId)
+              setJobStatus(s)
+              if (s.status === 'done') { stopPolling(); setPageState('done') }
+              else if (s.status === 'error') {
+                stopPolling()
+                setErrorMsg(s.error || s.error_message || 'An unknown error occurred.')
+                setPageState('error')
+              }
+            } catch { /* ignore transient poll errors */ }
+          }, 2000)
+        }
+      })
+      .catch(() => {
+        // History lookup failed - show an error rather than silently going blank
+        setErrorMsg('Could not load this analysis. It may have been deleted.')
+        setPageState('error')
+      })
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // Auto-detect company name + fiscal years when new PDFs are added
   useEffect(() => {
@@ -990,11 +1082,11 @@ export default function AnalysePage() {
     try {
       const fd = new FormData()
       files.forEach((item) => fd.append('files', item.file))
-      if (config.companyName) fd.append('company_name', config.companyName)
+      if (config.companyName) fd.append('company', config.companyName)
       if (config.ticker) fd.append('ticker', config.ticker)
-      if (config.fiscalYears) fd.append('fiscal_years', config.fiscalYears)
+      if (config.fiscalYears) fd.append('years', config.fiscalYears)
       fd.append('currency', config.currency)
-      fd.append('units', config.units)
+      fd.append('unit', config.units)
 
       const { job_id } = await startAnalysis(fd)
       setJobId(job_id)
@@ -1065,5 +1157,13 @@ export default function AnalysePage() {
       {/* Chat FAB - only when analysis is done */}
       {pageState === 'done' && jobId && <ChatWidget jobId={jobId} />}
     </>
+  )
+}
+
+export default function AnalysePage() {
+  return (
+    <Suspense>
+      <AnalysePageInner />
+    </Suspense>
   )
 }

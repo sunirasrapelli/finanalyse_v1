@@ -284,7 +284,7 @@ users  (id TEXT PK, google_id TEXT UNIQUE, email, name, picture, created_at, las
 jobs   (id TEXT PK, status, company_name, currency, unit, fiscal_years JSON,
         error, created_at, finished_at, user_id FK->users)
 reports (job_id TEXT PK FK->jobs CASCADE, report_path, excel_path,
-         commentary JSON, next_steps JSON)
+         commentary JSON, next_steps JSON, metrics JSON)
 ```
 
 - WAL mode enabled; parameterized queries only
@@ -415,6 +415,11 @@ Register with: `gh secret set <NAME> --repo nurixlabs/team-ppo-nahi-milega --bod
   - [x] Auto-detect on upload: PDF uploaded -> /auto-detect (first 5 pages) -> fills company name + fiscal years
   - [x] Independent scroll panes on analyse page (sidebar + main content scroll separately)
   - [x] Bug fixes: spinner animation, Image hydration, error field name alignment (error vs error_message)
+  - [x] Vision fallback (Pass 3): pymupdf renders IS-keyword pages as JPEG -> Claude vision API when document-API gap-fill returns no revenue
+  - [x] PipelineProgress redesigned: 5 numbered steps shown from start; dotted vertical connector acts as progress bar; active step glows white; done steps turn green
+  - [x] Chat widget: react-markdown renders AI responses (bold, lists, headings); panel height increased to 700px; width 400px
+  - [x] Google OAuth local dev: real credentials in service-backend/src/.env; backend restarts load them; hero badge dot blink removed
+  - [x] Dynamic stat cards: `_compute_metrics` in `app.py` extracts revenue, gross margin %, FCF, D/E from FinancialData after extraction; stored on `job.metrics`; returned in `/status` response; `AnalysisHeader` uses real values with currency/unit-aware formatting; falls back to "--" when data is absent
 - [ ] Phase 7 - Deploy and verify (push to stage, smoke test on EKS)
 - [ ] Phase 8 - Tests (deferred; demo manually with Reliance FY2024 + Infosys FY2024)
 
@@ -427,6 +432,31 @@ Register with: `gh secret set <NAME> --repo nurixlabs/team-ppo-nahi-milega --bod
 - **Gap-fill trigger**: `needs_gap_fill = conf < CONFIDENCE_API_FALLBACK or not has_revenue` - must include `not has_revenue` condition so gap-fill runs even when pdfplumber confidence is high but revenue is missing.
 - **CSS spinner**: Never use `transform: translateY(-50%)` on a spinning element - `@keyframes spin` uses `transform: rotate()` and overwrites it. Use `top: calc(50% - Npx)` instead.
 - **Next.js Image**: Do not set CSS `width`/`height` on `<Image>` when `width`/`height` props are already set - causes hydration mismatch. Use only `style={{ objectFit: 'contain' }}`.
+- **Vision fallback pdfplumber scan**: `_call_extraction_api_images` uses `pdfplumber.open()` to find IS-keyword pages. These keywords (`revenue`, `total income`, `net profit`, etc.) are defined in `_IS_KEYWORDS` frozenset in `extractor.py`. Do not remove this set.
+- **Google OAuth `redirect_uri_mismatch`**: The redirect URI in `.env` (`GOOGLE_REDIRECT_URI`) must match exactly what is registered in Google Cloud Console under the OAuth 2.0 Client ID's "Authorised redirect URIs". For local dev: `http://localhost:8000/auth/callback`. Backend must be restarted after any `.env` change (env vars are loaded at module import time).
+- **PAT must NOT use "Total Comprehensive Income"**: Under Ind AS/IFRS, TCI = PAT + OCI. Using TCI as PAT overstates earnings by 6-11% (exactly the OCI amount). `pdf_parser.py` pattern list and `extraction_system.txt` now explicitly exclude TCI from PAT matching.
+- **Total Income formula was `=B4+B4` (wrong)**: `total_income()` in `formula_registry.py` had signature `(rev_col, other_col, row)` but was called as `(cx, cx, IS["other_income"])` — both cols the same, row pointing to Other Income row. Generated `=OtherIncome+OtherIncome`. Fixed to `total_income(col, rev_row, other_row)` returning `={col}{rev_row}+{col}{other_row}`. Call updated to `total_income(cx, IS["revenue"], IS["other_income"])`.
+- **EBITDA fallback wrote None**: The `elif` branch in `excel_builder.py` called `val(IS["ebitda"], c, stmt.ebitda)` where `stmt.ebitda` is already `None`. Now writes live formula `=IFERROR(PBT+Interest+DA,"")` as fallback.
+- **Lease liabilities excluded from debt**: Companies with no traditional borrowings (TCS, Infosys) show zero debt because Ind AS 116 lease liabilities were extracted but ignored. `pdf_parser.py` now merges `lease_nc` into `long_term_debt` and `lease_curr` into `short_term_borrowings` before returning.
+- **COGS patterns missed IT company cost structure**: Pattern `r"cost of materials consumed"` matched tiny software licence costs (~₹1,462 Cr) instead of actual cost of revenue (~₹93,276 Cr). Added `r"cost of revenue"`, `r"cost of services"`, `r"subcontracting"` at the top of the COGS pattern list.
+- **Shares outstanding unit ambiguity**: Reports express shares in lakhs (e.g., 37,401 lakh = 3,740 Mn). Extraction system prompt now requires normalization to millions with explicit division rule.
+- **Reports list only shows user-linked jobs**: `list_jobs` filtered strictly by `user_id = ?`, hiding analyses run before login (user_id IS NULL). Fixed to `(user_id = ? OR user_id IS NULL)` so unclaimed jobs are always visible.
+- **Unknown Company in reports**: `upsert_job` SQL overwrote `company_name` with `""` on every update. Fixed with `CASE WHEN excluded.company_name != '' THEN ... ELSE jobs.company_name END` for company_name/currency/unit/fiscal_years. `_fail_job` now passes `company_name=job.company_name` to preserve the name on failure.
+- **Eye button shows blank page**: Used `pollStatus` which could fail silently (`.catch(() => setPageState('idle'))`). Now uses `getJobDetail` (calls `/history/{job_id}`) which always reads from SQLite and returns complete data. On error shows an explicit message instead of blank. Also: `deleteJob` was calling wrong URL `/jobs/` instead of `/history/` - fixed. Status SQLite fallback now includes `currency`, `unit`, `fiscal_years`.
+- **`/history` returns `id` not `job_id`**: The `list_jobs` SQL returned `j.id` but the frontend `HistoryEntry` interface expected `job_id`. Every `report.job_id` was `undefined` at runtime, making the eye link go to `/analyse?job_id=undefined` (404), download links broken, and deletes broken. Fixed by adding `j.id AS job_id` to the SQL in both `list_jobs` and `get_job_detail`.
+- **Stat cards blank when loaded from history**: Metrics (revenue, gross margin, FCF, D/E) were computed in memory only and returned as `null` from `/history/{job_id}`. Fixed by adding a `metrics TEXT` column to the `reports` table, persisting `job.metrics` via `upsert_report(metrics=job.metrics)`, parsing it in `get_job_detail`, and mapping it through `getJobDetail` in api.ts.
+- **Form field names mismatched**: Frontend sent `company_name`, `fiscal_years`, `units` in FormData but backend reads `company`, `years`, `unit`. The company name hint was silently discarded — the extractor never received it, and if it couldn't auto-detect from the PDF the name stayed empty forever. Fixed: `fd.append('company', ...)`, `fd.append('years', ...)`, `fd.append('unit', ...)`.
+
+---
+
+## Google OAuth Local Dev Setup
+
+1. Go to [Google Cloud Console > APIs & Services > Credentials](https://console.cloud.google.com/apis/credentials)
+2. Click the OAuth 2.0 Client ID (`503986173072-...`)
+3. Under **Authorised redirect URIs**, add: `http://localhost:8000/auth/callback`
+4. Save - takes effect immediately (no Google propagation delay for localhost)
+5. Credentials are already in `service-backend/src/.env` (gitignored)
+6. Backend must be running from `service-backend/src/` with conda env `venv`
 
 ---
 

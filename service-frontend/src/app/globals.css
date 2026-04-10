@@ -1730,8 +1730,8 @@ body::after {
   position: fixed;
   bottom: 5.5rem;
   right: 2rem;
-  width: 380px;
-  max-height: 520px;
+  width: 400px;
+  max-height: 700px;
   background: var(--bg-secondary);
   border: 1px solid var(--border-default);
   border-radius: 16px;
@@ -1832,6 +1832,67 @@ body::after {
   color: var(--text-secondary);
   border: 1px solid var(--border-subtle);
   border-bottom-left-radius: 4px;
+}
+
+/* Markdown rendering inside chat bubbles */
+.chat-bubble-md p {
+  margin: 0 0 0.5rem;
+}
+.chat-bubble-md p:last-child {
+  margin-bottom: 0;
+}
+.chat-bubble-md strong {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.chat-bubble-md em {
+  font-style: italic;
+}
+.chat-bubble-md ul,
+.chat-bubble-md ol {
+  margin: 0.4rem 0 0.5rem 1.1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+.chat-bubble-md li {
+  line-height: 1.5;
+}
+.chat-bubble-md h1,
+.chat-bubble-md h2,
+.chat-bubble-md h3 {
+  font-family: 'Space Grotesk', sans-serif;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0.6rem 0 0.3rem;
+  line-height: 1.3;
+}
+.chat-bubble-md h1 { font-size: 1rem; }
+.chat-bubble-md h2 { font-size: 0.9375rem; }
+.chat-bubble-md h3 { font-size: 0.875rem; }
+.chat-bubble-md code {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.78rem;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  padding: 0.1rem 0.35rem;
+}
+.chat-bubble-md hr {
+  border: none;
+  border-top: 1px solid var(--border-subtle);
+  margin: 0.6rem 0;
+}
+/* User bubble overrides - keep text white on blue bg */
+.chat-message.user .chat-bubble-md strong,
+.chat-message.user .chat-bubble-md h1,
+.chat-message.user .chat-bubble-md h2,
+.chat-message.user .chat-bubble-md h3 {
+  color: white;
+}
+.chat-message.user .chat-bubble-md code {
+  background: rgba(255, 255, 255, 0.15);
+  border-color: rgba(255, 255, 255, 0.2);
 }
 
 .chat-avatar {
@@ -2402,7 +2463,6 @@ body::after {
   height: 6px;
   background: var(--accent-green);
   border-radius: 50%;
-  animation: blink 2s ease-in-out infinite;
 }
 
 .hero-headline {

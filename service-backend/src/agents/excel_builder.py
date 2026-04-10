@@ -276,12 +276,13 @@ def _build_is(wb: xlsxwriter.Workbook, sty: StyleBook,
         val(IS["shares"], c, stmt.shares_outstanding, sty.num_int)
         val(IS["dps"], c, stmt.dividends_per_share)
 
-        # EBITDA — use extracted if available, else compute
+        # EBITDA — use extracted if available, else derive via live formula: PBT + Interest + D&A
         if stmt.ebitda is not None:
             val(IS["ebitda"], c, stmt.ebitda, sty.num_sub)
-        elif stmt.revenue is not None and stmt.cogs is not None:
-            # approximate: revenue - opex components (no DA yet)
-            val(IS["ebitda"], c, stmt.ebitda, sty.num_sub)
+        else:
+            fml(IS["ebitda"], c,
+                f"=IFERROR({cx}{IS['pbt']}+{cx}{IS['interest']}+{cx}{IS['da']},\"\")",
+                sty.num_sub)
 
         # PAT — use extracted if available
         if stmt.pat is not None:
@@ -292,8 +293,7 @@ def _build_is(wb: xlsxwriter.Workbook, sty: StyleBook,
             val(IS["pbt"], c, stmt.pbt, sty.num_sub)
 
         # Computed formulas
-        fml(IS["total_income"], c, total_income(cx, cx, IS["other_income"])
-            .replace(f"{cx}{IS['other_income']}", f"{cx}{IS['other_income']}"), sty.num_sub)
+        fml(IS["total_income"], c, total_income(cx, IS["revenue"], IS["other_income"]), sty.num_sub)
 
         fml(IS["gross_profit"], c,
             gross_profit(IS["revenue"], IS["cogs"], cx), sty.num_sub)

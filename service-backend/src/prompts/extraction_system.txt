@@ -15,10 +15,22 @@ EXTRACTION RULES — follow these strictly:
 11. EBITDA may not be stated explicitly; if it isn't, set it to null (the Excel model will compute it from components).
 12. Free Cash Flow = Cash from Operations + Capex (where Capex is a negative number).
 
+CRITICAL DISTINCTIONS — these are frequent sources of extraction error:
+
+13. PAT vs Total Comprehensive Income: Under Ind AS / IFRS, the P&L ends with "Profit for the year/period" (= PAT). Below it is "Other Comprehensive Income" (OCI: FX translation, actuarial gains/losses, fair value movements) and then "Total Comprehensive Income" = PAT + OCI. ALWAYS extract "Profit for the year/period" as pat. NEVER use "Total Comprehensive Income" as pat — it overstates earnings by the OCI amount.
+
+14. Trade Receivables vs Total Current Assets: Trade receivables is ONE line item within current assets (typically 15-40% of total current assets). If the number you are about to return for accounts_receivable is equal to or close to total_current_assets, you have made an error — re-read the balance sheet and find the specific "Trade receivables / Debtors" line.
+
+15. Shares Outstanding — always in MILLIONS: Return shares_outstanding in MILLIONS regardless of how the report expresses them. If the report states shares in lakhs (e.g., "3,74,001 lakh shares"), divide by 100 to get millions (3,740.01 Mn). If in thousands, divide by 1,000. If the computed EPS (PAT / shares) looks wildly off against any EPS stated in the report, your shares figure is in the wrong unit — correct it.
+
+16. Debt for IT / service companies — include lease liabilities: Companies like TCS, Infosys, Wipro often have zero traditional borrowings but significant lease liabilities under Ind AS 116 / IFRS 16. These appear as "Lease liabilities" (current and non-current). Include non-current lease liabilities in long_term_debt and current lease liabilities in short_term_borrowings. Do not leave both fields null just because "Borrowings" is zero.
+
+17. COGS for IT / service companies: Pure IT services and FMCG companies often do not have "Cost of Goods Sold" or "Cost of Materials Consumed". Their primary cost is labelled "Employee benefits expense", "Cost of revenues", "Cost of services", or "Subcontracting costs". Map the largest direct-cost line (cost of revenue / cost of services) to cogs. Do not return a tiny incidental cost (e.g., software licences) as cogs.
+
 CONFIDENCE SCORING:
-- 0.9–1.0: Value is clearly labelled and unambiguous
-- 0.7–0.9: Value found but requires minor interpretation (e.g., different label)
-- 0.5–0.7: Value is uncertain, derived indirectly, or there are restatements
-- < 0.5: Serious doubt — flag in extraction_notes
+- 0.9-1.0: Value is clearly labelled and unambiguous
+- 0.7-0.9: Value found but requires minor interpretation (e.g., different label)
+- 0.5-0.7: Value is uncertain, derived indirectly, or there are restatements
+- < 0.5: Serious doubt - flag in extraction_notes
 
 Always call the extract_financial_statements tool. Never return prose.

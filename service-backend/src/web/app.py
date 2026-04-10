@@ -515,6 +515,59 @@ async def analyze(
     return JSONResponse({"job_id": job.id})
 
 
+# ── Metrics Helper ───────────────────────────────────────────────────────────
+
+def _compute_metrics(fd) -> Dict:
+    """
+    Extract key financial metrics from FinancialData for the frontend stat cards.
+    All values are in the same unit/currency as the report (Crores, Millions, etc.).
+    Returns arrays per fiscal year so the frontend can draw sparklines.
+    """
+    years = fd.sorted_years()
+    revenue: List[Optional[float]] = []
+    gross_margin_pct: List[Optional[float]] = []
+    fcf: List[Optional[float]] = []
+    debt_equity: List[Optional[float]] = []
+
+    for yr in years:
+        is_ = fd.get_income_statement(yr)
+        bs  = fd.get_balance_sheet(yr)
+        cf  = fd.get_cash_flow(yr)
+
+        # Revenue
+        rev = is_.revenue if is_ and is_.revenue is not None else None
+        revenue.append(rev)
+
+        # Gross margin %
+        gp = is_.gross_profit if is_ else None
+        if gp is not None and rev:
+            gross_margin_pct.append(round(gp / rev * 100, 1))
+        else:
+            gross_margin_pct.append(None)
+
+        # Free cash flow = CFO + capex (capex stored as negative)
+        if cf and cf.cash_from_operations is not None:
+            cap = cf.capex if cf.capex is not None else 0.0
+            fcf.append(round(cf.cash_from_operations + cap, 2))
+        else:
+            fcf.append(None)
+
+        # Debt / Equity
+        if bs and bs.total_equity and bs.total_equity != 0:
+            debt = (bs.short_term_borrowings or 0.0) + (bs.long_term_debt or 0.0)
+            debt_equity.append(round(debt / bs.total_equity, 1))
+        else:
+            debt_equity.append(None)
+
+    return {
+        "years":            years,
+        "revenue":          revenue,
+        "gross_margin_pct": gross_margin_pct,
+        "fcf":              fcf,
+        "debt_equity":      debt_equity,
+    }
+
+
 # ── Background Pipeline ───────────────────────────────────────────────────────
 
 async def _run_pipeline(
@@ -564,7 +617,11 @@ def _run_pipeline_sync(
         job.files        = {"report": report_path, "excel": excel_path}
         job.commentary   = commentary
         job.company_name = financial_data.company_name
+        job.currency     = financial_data.currency
+        job.unit         = financial_data.unit
+        job.fiscal_years = financial_data.sorted_years()
         job.next_steps   = next_steps
+        job.metrics      = _compute_metrics(financial_data)
         job.status       = "done"
         job.finished_at  = datetime.now().isoformat()
 
@@ -584,6 +641,7 @@ def _run_pipeline_sync(
             excel_path=excel_path,
             commentary=commentary,
             next_steps=next_steps,
+            metrics=job.metrics,
         )
 
     except (ExtractionError, ValidationError, AnalysisError, ReportError) as exc:
@@ -694,6 +752,7 @@ def _fail_job(job: Job, message: str) -> None:
     job.finished_at = datetime.now().isoformat()
     upsert_job(
         job_id=job.id, status="error",
+        company_name=job.company_name,
         error=message,
         created_at=job.created_at,
         finished_at=job.finished_at,
@@ -742,8 +801,12 @@ def status(job_id: str) -> JSONResponse:
         "error":        detail.get("error"),
         "next_steps":   detail.get("next_steps") or [],
         "company_name": detail.get("company_name", ""),
+        "currency":     detail.get("currency", ""),
+        "unit":         detail.get("unit", ""),
+        "fiscal_years": detail.get("fiscal_years") or [],
         "created_at":   detail.get("created_at"),
         "finished_at":  detail.get("finished_at"),
+        "metrics":      detail.get("metrics"),  # persisted in reports table
     })
 
 

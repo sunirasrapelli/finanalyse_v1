@@ -17,7 +17,8 @@ class Job:
     __slots__ = (
         "id", "status", "progress", "files", "error",
         "next_steps", "commentary", "company_name",
-        "created_at", "finished_at",
+        "currency", "unit", "fiscal_years",
+        "created_at", "finished_at", "metrics",
     )
 
     def __init__(self, job_id: str) -> None:
@@ -29,8 +30,12 @@ class Job:
         self.next_steps:   List[Dict[str, str]]                         = []
         self.commentary:   Dict[str, str]                               = {}
         self.company_name: str                                           = ""
+        self.currency:     str                                           = ""
+        self.unit:         str                                           = ""
+        self.fiscal_years: List[int]                                     = []
         self.created_at:   str                                           = datetime.now().isoformat()
         self.finished_at:  Optional[str]                                 = None
+        self.metrics:      Optional[Dict]                                = None
 
     def log(self, step: str, message: str, *, done: bool = False) -> None:
         self.progress.append({"step": step, "message": message, "done": done})
@@ -44,8 +49,12 @@ class Job:
             "error":        self.error,
             "next_steps":   self.next_steps,
             "company_name": self.company_name,
+            "currency":     self.currency,
+            "unit":         self.unit,
+            "fiscal_years": self.fiscal_years,
             "created_at":   self.created_at,
             "finished_at":  self.finished_at,
+            "metrics":      self.metrics,
         }
 
 

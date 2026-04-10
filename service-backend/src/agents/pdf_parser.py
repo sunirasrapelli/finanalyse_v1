@@ -518,14 +518,17 @@ _IS_FIELDS: Dict[str, List[str]] = {
         r"non.operating income",
     ],
     "cost_of_goods_sold": [
+        # IT/service company cost of revenue first (avoid matching tiny incidental costs)
+        r"cost of revenue",
+        r"cost of services",
+        r"subcontracting",
+        # Manufacturing / FMCG formats
         r"cost of materials consumed",
         r"cost of goods sold",
-        r"cost of revenue",
         r"cost of sales",
         r"cost of products sold",
         r"raw material",
         r"cost of material",
-        r"cost of services",
         r"direct cost",
     ],
     "purchases_trading": [
@@ -607,7 +610,12 @@ _IS_FIELDS: Dict[str, List[str]] = {
         r"total tax",
         r"total income tax",
     ],
+    "current_tax":  [r"current tax"],
+    "deferred_tax": [r"deferred tax"],
     "pat": [
+        # NOTE: "total comprehensive income" is intentionally excluded.
+        # Under Ind AS / IFRS, TCI = PAT + OCI (FX, actuarial gains, etc.)
+        # Using TCI overstates earnings by 6-11% (the OCI amount).
         r"profit for the year",
         r"profit after tax",
         r"net profit",
@@ -615,7 +623,6 @@ _IS_FIELDS: Dict[str, List[str]] = {
         r"net income",
         r"net earnings",
         r"profit attributable",
-        r"total comprehensive income",
         r"net income attributable",
     ],
     "eps_basic": [
@@ -805,9 +812,20 @@ def map_balance_sheet(rows: RawTable, from_unit: str, to_unit: str,
                      r"accrued expense", r"accrued and other")
     total_cl     = g(r"total current liabilit")
 
+    # Combine traditional borrowings with Ind AS 116 / IFRS 16 lease liabilities.
+    # For asset-light companies (IT, FMCG) lease liabilities ARE the primary debt.
+    lt_debt_total: Optional[float] = None
+    if lt_borrow is not None or lease_nc is not None:
+        lt_debt_total = (lt_borrow or 0) + (lease_nc or 0)
+
+    st_debt_total: Optional[float] = None
+    if st_borrow is not None or lease_curr is not None:
+        st_debt_total = (st_borrow or 0) + (lease_curr or 0)
+
+    # Net debt computation
     total_debt: Optional[float] = None
-    if lt_borrow is not None or st_borrow is not None:
-        total_debt = (lt_borrow or 0) + (st_borrow or 0)
+    if lt_debt_total is not None or st_debt_total is not None:
+        total_debt = (lt_debt_total or 0) + (st_debt_total or 0)
 
     net_debt: Optional[float] = None
     if total_debt is not None and cash is not None:
@@ -841,11 +859,13 @@ def map_balance_sheet(rows: RawTable, from_unit: str, to_unit: str,
         reserves_and_surplus=other_equity,
         minority_interest=nci,
         total_equity=total_equity,
-        long_term_debt=lt_borrow,
+        # Non-current liabilities (borrowings + Ind AS 116 lease liabilities combined)
+        long_term_debt=lt_debt_total,
         deferred_tax_liabilities=dt_liab,
         other_non_current_liabilities=other_nc_liab,
         total_non_current_liabilities=total_nc_liab,
-        short_term_borrowings=st_borrow,
+        # Current liabilities (borrowings + current lease liabilities combined)
+        short_term_borrowings=st_debt_total,
         accounts_payable=trade_pay,
         other_current_liabilities=other_cl,
         total_current_liabilities=total_cl,

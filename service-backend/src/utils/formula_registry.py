@@ -27,8 +27,8 @@ def col_letter(n: int) -> str:
 
 # ── Income Statement Formulas ─────────────────────────────────────────────────
 
-def total_income(rev_col: str, other_col: str, row: int) -> str:
-    return f"={rev_col}{row}+{other_col}{row}"
+def total_income(col: str, rev_row: int, other_row: int) -> str:
+    return f"={col}{rev_row}+{col}{other_row}"
 
 def total_opex(cogs_row: int, emp_row: int, other_row: int, col: str) -> str:
     return f"=SUM({col}{cogs_row},{col}{emp_row},{col}{other_row})"

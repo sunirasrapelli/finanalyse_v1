@@ -12,6 +12,14 @@ function authHeaders(): Record<string, string> {
   return token ? { Authorization: `Bearer ${token}` } : {}
 }
 
+export interface JobMetrics {
+  years: number[]
+  revenue: (number | null)[]
+  gross_margin_pct: (number | null)[]
+  fcf: (number | null)[]
+  debt_equity: (number | null)[]
+}
+
 export interface JobStatus {
   id?: string
   job_id?: string
@@ -29,6 +37,7 @@ export interface JobStatus {
   progress?: Array<{ step: string; message: string; done: boolean; timestamp?: string }>
   log?: Array<{ step: string; message: string; done: boolean; timestamp?: string }>
   next_steps?: Array<{ priority: string; title: string; description: string }>
+  metrics?: JobMetrics | null
 }
 
 export interface HistoryEntry {
@@ -106,7 +115,7 @@ export async function getHistory(): Promise<HistoryEntry[]> {
  * Delete a job and its associated files.
  */
 export async function deleteJob(jobId: string): Promise<void> {
-  const res = await fetch(`${API_URL}/jobs/${jobId}`, {
+  const res = await fetch(`${API_URL}/history/${jobId}`, {
     method: 'DELETE',
     headers: {
       ...authHeaders(),
@@ -115,6 +124,36 @@ export async function deleteJob(jobId: string): Promise<void> {
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }))
     throw new Error(err.detail || 'Failed to delete job')
+  }
+}
+
+/**
+ * Fetch full detail for a completed job from SQLite history.
+ * More reliable than pollStatus for already-completed jobs (always reads from DB).
+ */
+export async function getJobDetail(jobId: string): Promise<JobStatus> {
+  const res = await fetch(`${API_URL}/history/${jobId}`, {
+    headers: { ...authHeaders() },
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }))
+    throw new Error(err.detail || 'Job not found')
+  }
+  const d = await res.json()
+  // Map history detail shape -> JobStatus shape
+  return {
+    id:           d.id,
+    status:       d.status,
+    company_name: d.company_name || '',
+    currency:     d.currency || '',
+    unit:         d.unit || '',
+    fiscal_years: d.fiscal_years || [],
+    error:        d.error || '',
+    next_steps:   d.next_steps || [],
+    created_at:   d.created_at,
+    finished_at:  d.finished_at,
+    progress:     [],
+    metrics:      d.metrics || null,
   }
 }
 
