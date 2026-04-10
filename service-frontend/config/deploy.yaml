@@ -1,7 +1,4 @@
-# ── service-two — Next.js example ────────────────────────────────────────────
-# This folder is an example. Delete it if your team doesn't need it, or rename
-# the folder and update helmReleaseName / namespace below.
-# ─────────────────────────────────────────────────────────────────────────────
+# ── service-frontend — FinAnalyse Next.js 14 ─────────────────────────────────
 
 # ── Pipeline config ───────────────────────────────────────────────────────────
 helmReleaseName: finanalyse-frontend
