@@ -7,22 +7,22 @@ Strategy:
   1. Scan every page for financial statement headers (keyword match)
   2. Detect year-column x-boundaries from the "March 31, XXXX" header words
   3. Reconstruct each row: label (left zone) + FY1 value + FY2 value
-  4. Map row labels → financial model fields via regex patterns
+  4. Map row labels -> financial model fields via regex patterns
   5. Convert units (Millions / Crores / Billions / Thousands)
 
 Handles:
   - Multi-page statements (BS assets + liabilities on separate pages)
-  - Bracket negatives:  (10,229.1) → -10229.1
-  - Split-word artefacts: "C ost" → "Cost"
+  - Bracket negatives:  (10,229.1) -> -10229.1
+  - Split-word artefacts: "C ost" -> "Cost"
   - Section headers with no values
   - Notes column (ignored)
   - Both Standalone and Consolidated (prefer Consolidated)
+  - International report formats (US, European, Indian)
 """
 
 from __future__ import annotations
 
 import re
-from contextlib import contextmanager
 from typing import Dict, List, Optional, Tuple
 
 import pdfplumber
@@ -33,27 +33,28 @@ from utils.logger import get_logger
 
 log = get_logger()
 
-# ── Types ─────────────────────────────────────────────────────────────────────
-Row = Dict[str, Optional[float]]          # {"label": str, "y1": float|None, "y2": float|None}
-RawTable = List[Dict]                     # list of Row dicts
+# ---- Types -------------------------------------------------------------------
+Row = Dict[str, Optional[float]]
+RawTable = List[Dict]
 
 
-# ── Number helpers ─────────────────────────────────────────────────────────────
+# ---- Number helpers ----------------------------------------------------------
 
 def _parse_number(text: str) -> Optional[float]:
     """
-    Parse Indian-format numbers from PDF text.
-    Examples: '484,968.5' → 484968.5
-              '(10,229.1)' → -10229.1
-              '-' / '—' / 'Nil' → None
+    Parse numbers from PDF text. Handles:
+      Indian format: '4,84,968.5' -> 484968.5
+      US format: '484,968.5' -> 484968.5
+      Bracket negatives: '(10,229.1)' -> -10229.1
+      Dashes / Nil -> None
     """
     if not text:
         return None
     text = text.strip()
-    if text in ('-', '—', '–', '', 'nil', 'Nil', 'NIL', 'N/A', 'n/a'):
+    if text in ('-', '--', '---', '—', '–', '', 'nil', 'Nil', 'NIL', 'N/A', 'n/a', 'na', 'NA'):
         return None
     negative = text.startswith('(') and text.endswith(')')
-    cleaned = re.sub(r'[(),\s₹]', '', text)   # strip brackets, commas handled below
+    cleaned = re.sub(r'[(),\s₹$€£]', '', text)
     cleaned = cleaned.replace(',', '')
     try:
         val = float(cleaned)
@@ -63,14 +64,13 @@ def _parse_number(text: str) -> Optional[float]:
 
 
 def _unit_to_crores(value: Optional[float], from_unit: str) -> Optional[float]:
-    """Convert any unit → Crores. (1 Crore = 10 Million = 0.01 Billion)"""
     if value is None:
         return None
     factors = {
         'Crores': 1.0,
-        'Millions': 0.1,         # 1 Crore = 10 Million
-        'Billions': 100.0,        # 1 Billion = 100 Crores
-        'Thousands': 0.0001,      # 1 Crore = 10,000 Thousand
+        'Millions': 0.1,
+        'Billions': 100.0,
+        'Thousands': 0.0001,
     }
     return value * factors.get(from_unit, 1.0)
 
@@ -90,11 +90,10 @@ def _convert(value: Optional[float], from_unit: str, to_unit: str) -> Optional[f
     return in_crores * factors.get(to_unit, 1.0)
 
 
-# ── Page-level extraction ──────────────────────────────────────────────────────
+# ---- Page-level helpers ------------------------------------------------------
 
 def _detect_unit(words: List[dict]) -> str:
-    """Detect the reporting unit from page header text."""
-    header_text = ' '.join(w['text'] for w in words if w['top'] < 140).lower()
+    header_text = ' '.join(w['text'] for w in words if w['top'] < 180).lower()
     if 'million' in header_text:
         return 'Millions'
     if 'billion' in header_text:
@@ -106,37 +105,33 @@ def _detect_unit(words: List[dict]) -> str:
 
 def _detect_columns(words: List[dict]) -> Optional[Tuple[float, float, float]]:
     """
-    Find (label_max_x, year1_right_x, year2_right_x) from header.
-    Looks for 4-digit year words in the top 180 points of the page.
-    Returns None if no year headers found.
+    Find (label_max_x, col1_right_x, col2_right_x) from year header words.
+    Year words must appear in top 220pt of page.
+    Returns None if fewer than 1 year word found.
     """
     year_words = [
         w for w in words
-        if re.fullmatch(r'20\d\d', w['text']) and w['top'] < 200
+        if re.fullmatch(r'20\d\d', w['text']) and w['top'] < 220
     ]
     if not year_words:
         return None
 
-    # Sort by x1 (right edge); usually two year columns
     year_words.sort(key=lambda w: w['x1'])
     if len(year_words) >= 2:
-        col1_right = year_words[-2]['x1']  # earlier year or same year (left col)
-        col2_right = year_words[-1]['x1']  # later year (right col)
+        col1_right = year_words[-2]['x1']
+        col2_right = year_words[-1]['x1']
     else:
         col1_right = year_words[-1]['x1']
-        col2_right = col1_right           # single year
+        col2_right = col1_right
 
-    # Label column ends well before the first number column
-    # (numbers are right-aligned, so subtract ~80 pts from right edge)
     label_max = col1_right - 80
     return label_max, col1_right, col2_right
 
 
 def _extract_years_from_header(words: List[dict]) -> Tuple[Optional[int], Optional[int]]:
-    """Return (year1, year2) from the page header."""
     year_words = [
         w for w in words
-        if re.fullmatch(r'20\d\d', w['text']) and w['top'] < 200
+        if re.fullmatch(r'20\d\d', w['text']) and w['top'] < 220
     ]
     year_words.sort(key=lambda w: w['x1'])
     years = [int(w['text']) for w in year_words]
@@ -147,17 +142,14 @@ def _extract_years_from_header(words: List[dict]) -> Tuple[Optional[int], Option
 
 def _group_rows(words: List[dict], label_max: float,
                 col1_right: float, col2_right: float,
-                tolerance: float = 3.0) -> List[dict]:
+                tolerance: float = 3.5) -> List[dict]:
     """
-    Group words into rows by their vertical position (top), then assign
-    each word to label / year1 / year2 column.
-
-    Returns list of {"label": str, "raw1": str, "raw2": str}
+    Group words into rows by vertical position, assign to label / col1 / col2.
+    Tolerances are generous to handle slight PDF rendering offsets.
     """
     if not words:
         return []
 
-    # Sort words by top, then by x0
     words = sorted(words, key=lambda w: (round(w['top'] / tolerance), w['x0']))
 
     rows: List[dict] = []
@@ -170,68 +162,130 @@ def _group_rows(words: List[dict], label_max: float,
             rows.append(current_row)
         current_row = {"label_parts": [], "raw1": None, "raw2": None}
 
+    col_tol = 28  # px tolerance for right-edge alignment
+
     for w in words:
         top = w['top']
-        text = w['text']
-
-        # New row?
         if current_top is None or abs(top - current_top) > tolerance:
             flush()
             current_top = top
-
         x0 = w['x0']
         x1 = w['x1']
-
-        # Assign to column
         if x0 < label_max:
-            current_row["label_parts"].append(text)
-        elif abs(x1 - col1_right) <= 22:
-            current_row["raw1"] = text
-        elif abs(x1 - col2_right) <= 22:
-            current_row["raw2"] = text
-        # else: notes column or other — skip
+            current_row["label_parts"].append(w['text'])
+        elif abs(x1 - col1_right) <= col_tol:
+            current_row["raw1"] = w['text']
+        elif abs(x1 - col2_right) <= col_tol:
+            current_row["raw2"] = w['text']
+        # else: notes / reference column — ignore
 
     flush()
 
-    # Build final rows, joining label parts and fixing split-word artefacts
     result = []
     for r in rows:
         label = _clean_label(' '.join(r['label_parts']))
         if not label and not r['raw1'] and not r['raw2']:
             continue
-        result.append({
-            "label":  label,
-            "raw1":   r['raw1'],
-            "raw2":   r['raw2'],
-        })
+        result.append({"label": label, "raw1": r['raw1'], "raw2": r['raw2']})
     return result
 
 
 def _clean_label(label: str) -> str:
-    """
-    Fix common PDF artefacts in label text:
-      - "C ost" → "Cost"   (single-char + space + rest, gap caused by font)
-      - Extra whitespace
-      - Strip leading roman numerals / letters like "(i)", "(a)", "(1)"
-    """
-    # Fix single-char split words: "C ost" → "Cost"
     label = re.sub(r'(?<!\w)([A-Z]) ([a-z])', r'\1\2', label)
-    # Normalise whitespace
     label = re.sub(r'\s+', ' ', label).strip()
-    # Strip leading list markers: (i), (ii), (a), (b), (1), (2) …
     label = re.sub(r'^\([a-z0-9ivxIVX]+\)\s*', '', label)
-    # Strip leading roman numerals
     label = re.sub(r'^[ivxIVX]+\.\s*', '', label)
     return label
 
 
-# ── Page scanner ──────────────────────────────────────────────────────────────
+# ---- Page quality scoring ---------------------------------------------------
 
-_STMT_PATTERNS = {
-    "pl":  [r"statement of profit and loss", r"profit and loss account",
-            r"statement of profit & loss"],
-    "bs":  [r"balance sheet"],
-    "cf":  [r"statement of cash flow", r"cash flow statement"],
+def _is_real_statement_page(text: str, words: List[dict]) -> bool:
+    """
+    Return True only if this page looks like an actual financial statement table,
+    not a TOC, footnote, or auditor page that merely mentions statement keywords.
+
+    Criteria:
+    - Has at least 1 standalone year word (20XX) in the top 220pt — i.e. the year
+      is a column header, not buried inside a long sentence like
+      "...for the years ended December 31, 2023, 2022 and 2021"
+    - Has at least 10 numeric values (actual table data, not just page numbers)
+    - Numeric values spread across at least 2 distinct x-columns
+    - The ratio of numeric words to total words is reasonable (>5%) — TOC pages
+      have very few numbers relative to their text
+    """
+    # Year words in header zone that are truly standalone column headers:
+    # their surrounding words must NOT be month/date text
+    year_words_raw = [w for w in words if re.fullmatch(r'20\d\d', w['text']) and w['top'] < 220]
+    if not year_words_raw:
+        return False
+
+    # Check that at least one year word is a standalone column header:
+    # it should have no adjacent text words within ~30pt horizontally that form a date phrase
+    has_standalone_year = False
+    for yw in year_words_raw:
+        nearby = [w for w in words
+                  if w is not yw
+                  and abs(w['top'] - yw['top']) < 8
+                  and abs(w['x0'] - yw['x1']) < 35]
+        nearby_text = ' '.join(w['text'].lower() for w in nearby)
+        # If surrounded by date words like "and", "december", "31", it's a sentence
+        if not re.search(r'\b(december|january|march|june|and|ended)\b', nearby_text):
+            has_standalone_year = True
+            break
+    if not has_standalone_year:
+        return False
+
+    # Must have substantial numeric data (not just page numbers 1-200)
+    numeric_words = [
+        w for w in words
+        if _parse_number(w['text']) is not None
+        and abs(_parse_number(w['text'])) > 1.0  # type: ignore[arg-type]
+        and w['top'] > 100  # skip header area
+    ]
+    if len(numeric_words) < 10:
+        return False
+
+    # Numeric values must span at least 2 distinct x-columns (columnar table)
+    x_buckets = sorted(set(round(w['x1'] / 20) * 20 for w in numeric_words))
+    if len(x_buckets) < 2:
+        return False
+
+    # Ratio check: TOC/auditor pages have many words but few numbers
+    total_words = len([w for w in words if w['top'] > 100])
+    if total_words > 0 and len(numeric_words) / total_words < 0.04:
+        return False
+
+    return True
+
+
+# ---- Page scanner -----------------------------------------------------------
+
+# Statement header patterns — anchored/restricted to avoid matching footnotes.
+# Key: use word boundaries and require the pattern to be a PAGE TITLE, not
+# just a phrase embedded in prose. We enforce this by checking the pattern
+# appears in the first 300 characters of the page text (the header area).
+_STMT_HEADER_PATTERNS = {
+    "pl": [
+        r"statement of profit and loss",
+        r"profit and loss account",
+        r"statement of profit & loss",
+        r"profit & loss account",
+        r"consolidated statements? of (income|operations|earnings)",
+        r"statements? of (income|operations|earnings)",
+        r"income statement",
+        r"profit and loss statement",
+    ],
+    "bs": [
+        r"balance sheet",
+        r"statement of financial position",
+        r"consolidated balance sheet",
+    ],
+    "cf": [
+        r"statement of cash flows?",
+        r"cash flow statement",
+        r"consolidated statements? of cash flows?",
+    ],
 }
 
 _SCOPE_PATTERNS = {
@@ -240,151 +294,168 @@ _SCOPE_PATTERNS = {
 }
 
 
-def _page_score(text: str, patterns: List[str]) -> bool:
-    low = text.lower()
-    return any(re.search(p, low) for p in patterns)
+def _page_matches_header(page_text: str, patterns: List[str]) -> bool:
+    """
+    Check if any pattern matches within the FIRST 400 characters of the page
+    (the title/header zone). This prevents footnotes from matching.
+    """
+    header_zone = page_text[:400].lower()
+    return any(re.search(p, header_zone) for p in patterns)
 
 
 def scan_for_statement_pages(pdf, target_years: Optional[List[int]] = None
                              ) -> Dict[str, List[int]]:
     """
-    Returns dict mapping statement type → list of 1-based page numbers
-    where that statement appears, filtered to match target_years.
-    Priority: consolidated > standalone.
+    Returns dict: statement_type -> list of 1-based page numbers.
+    Prefers consolidated over standalone.
+    Only returns pages that pass _is_real_statement_page quality gate.
     """
     results: Dict[str, Dict[str, List[int]]] = {
         "consolidated": {"pl": [], "bs": [], "cf": []},
         "standalone":   {"pl": [], "bs": [], "cf": []},
     }
-
-    # Also store page years for later filtering
-    page_years: Dict[int, List[int]] = {}   # 1-based page → detected years
+    page_years: Dict[int, List[int]] = {}
 
     for i, page in enumerate(pdf.pages):
         text = page.extract_text() or ""
-        low  = text.lower()
         pg_num = i + 1
 
-        # Must have real numbers to be a data page
+        # Must have real numbers
         if not re.search(r'\d{3,}', text):
             continue
 
-        # Detect years on this page from header (top portion)
         words = page.extract_words() or []
-        hdr_words = [w for w in words if w['top'] < 200]
-        yrs = [int(w['text']) for w in hdr_words
-               if re.fullmatch(r'20\d\d', w['text'])]
+        hdr_words = [w for w in words if w['top'] < 220]
+        yrs = [int(w['text']) for w in hdr_words if re.fullmatch(r'20\d\d', w['text'])]
         page_years[pg_num] = list(set(yrs))
 
-        # Determine scope
-        scope = None
-        for sc, pats in _SCOPE_PATTERNS.items():
-            if _page_score(low, pats):
-                scope = sc
+        # Check statement type — pattern must appear in header zone only
+        matched_stmt = None
+        for stmt, pats in _STMT_HEADER_PATTERNS.items():
+            if _page_matches_header(text, pats):
+                matched_stmt = stmt
                 break
-        if scope is None:
+        if matched_stmt is None:
             continue
 
-        # Determine statement type (only major statement headers)
-        for stmt, pats in _STMT_PATTERNS.items():
-            if _page_score(low, pats):
-                results[scope][stmt].append(pg_num)
+        # Quality gate: must look like an actual table, not a footnote
+        if not _is_real_statement_page(text, words):
+            continue
+
+        # Determine scope; default to standalone
+        scope = "standalone"
+        for sc, pats in _SCOPE_PATTERNS.items():
+            if any(re.search(p, text[:600].lower()) for p in pats):
+                scope = sc
                 break
 
+        results[scope][matched_stmt].append(pg_num)
+
     def _filter_by_years(pages: List[int]) -> List[int]:
-        """Keep only pages whose detected years overlap with target_years."""
         if not target_years:
             return pages
-        return [p for p in pages
-                if any(y in (target_years or []) for y in page_years.get(p, []))]
+        kept = [p for p in pages if any(y in target_years for y in page_years.get(p, []))]
+        # If year filtering drops everything, return unfiltered (year may be in body not header)
+        return kept if kept else pages
+
+    def _is_continuation_candidate(pg: int, stmt_type: str) -> bool:
+        """True if page pg could be a continuation of stmt_type (not a different statement start)."""
+        if pg < 1 or pg > len(pdf.pages):
+            return False
+        pg_text = pdf.pages[pg - 1].extract_text() or ""
+        pg_words = pdf.pages[pg - 1].extract_words() or []
+        is_other_stmt = any(
+            _page_matches_header(pg_text, _STMT_HEADER_PATTERNS[s])
+            for s in _STMT_HEADER_PATTERNS if s != stmt_type
+        )
+        if is_other_stmt:
+            return False
+        same_header = _page_matches_header(pg_text, _STMT_HEADER_PATTERNS.get(stmt_type, []))
+        return same_header or _is_real_statement_page(pg_text, pg_words)
 
     def _add_continuation(pages: List[int], stmt_type: str) -> List[int]:
         """
-        For each page, also include the immediately following page if it
-        looks like a continuation (same statement header, same years).
-        This handles BS split across assets page + liabilities page.
+        Include adjacent pages (before and after each matched page) that are
+        continuations of the same statement. This handles multi-page statements
+        where the page scanner only picked up page N but page N-1 or N+1 also
+        belongs to the same table.
         """
-        expanded = list(pages)
-        for p in pages:
-            nxt = p + 1
-            if nxt in page_years and nxt not in expanded:
-                nxt_text = (pdf.pages[nxt - 1].extract_text() or "").lower()
-                # Include if it has the same statement keyword and matching years
-                if _page_score(nxt_text, _STMT_PATTERNS.get(stmt_type, [])):
-                    if not target_years or any(
-                        y in target_years for y in page_years.get(nxt, [])
-                    ):
-                        expanded.append(nxt)
-        return sorted(set(expanded))
+        expanded = set(pages)
+        for p in sorted(pages):
+            # Look forward up to 3 pages
+            for nxt in range(p + 1, min(p + 4, len(pdf.pages) + 1)):
+                if nxt in expanded:
+                    continue
+                if _is_continuation_candidate(nxt, stmt_type):
+                    expanded.add(nxt)
+                else:
+                    break  # stop at first non-continuation
+            # Look backward 1 page (catches case where scanner found page N but N-1 was the real start)
+            prev = p - 1
+            if prev >= 1 and prev not in expanded and _is_continuation_candidate(prev, stmt_type):
+                expanded.add(prev)
+        return sorted(expanded)
 
-    # Prefer consolidated; fall back to standalone
     final: Dict[str, List[int]] = {}
     for stmt in ("pl", "bs", "cf"):
         pages = results["consolidated"][stmt] or results["standalone"][stmt]
+        if not pages:
+            continue
         pages = _filter_by_years(pages)
         pages = _add_continuation(pages, stmt)
-        if pages:
-            # Keep up to 4 pages per statement type
-            final[stmt] = pages[:4]
+        final[stmt] = pages[:5]  # up to 5 pages per statement
 
     return final
 
 
-# ── Multi-page table extractor ─────────────────────────────────────────────────
+# ---- Multi-page table extractor ---------------------------------------------
 
 def extract_table_from_pages(pdf, page_nums: List[int]) -> Tuple[RawTable, str, int, int]:
     """
-    Extract rows from one or more consecutive pages of the same statement.
+    Extract rows from one or more pages of the same statement.
     Returns (rows, detected_unit, year1, year2).
     """
     all_rows: RawTable = []
     detected_unit = "Crores"
     year1: Optional[int] = None
     year2: Optional[int] = None
+    label_max: float = 0
+    col1_right: float = 0
+    col2_right: float = 0
 
     for pg_num in page_nums:
         page = pdf.pages[pg_num - 1]
-        words = page.extract_words(keep_blank_chars=False,
-                                   x_tolerance=2, y_tolerance=3)
+        words = page.extract_words(keep_blank_chars=False, x_tolerance=2, y_tolerance=3)
         if not words:
             continue
 
-        # Detect columns & unit — only lock in values from the FIRST successful page
         col_info = _detect_columns(words)
         if col_info is not None:
             new_label_max, new_col1, new_col2 = col_info
             if year1 is None:
-                # First successful page: lock in unit, columns, and years
                 detected_unit = _detect_unit(words)
                 label_max, col1_right, col2_right = new_label_max, new_col1, new_col2
                 y1, y2 = _extract_years_from_header(words)
                 year1 = y1
                 year2 = y2
             else:
-                # Continuation page: update column positions but keep unit from page 1
+                # Continuation: update columns but keep unit from page 1
                 label_max, col1_right, col2_right = new_label_max, new_col1, new_col2
         elif year1 is None:
-            # First page must have a detectable header
-            log.warning(f"Could not detect columns on page {pg_num} — skipping")
+            log.warning(f"[LocalPDF] Could not detect columns on page {pg_num} — skipping")
             continue
-        # else: continuation page without header → reuse previous col_info
 
-        # Skip header rows (top < 170) on continuation pages
-        if len(all_rows) > 0:
-            data_words = [w for w in words if w['top'] > 165]
-        else:
-            data_words = words
-
+        # Skip header area on continuation pages
+        data_words = [w for w in words if w['top'] > 165] if all_rows else words
         rows = _group_rows(data_words, label_max, col1_right, col2_right)
         all_rows.extend(rows)
 
     return all_rows, detected_unit, year1 or 0, year2 or 0
 
 
-# ── Field mappers ──────────────────────────────────────────────────────────────
+# ---- Field pattern helpers --------------------------------------------------
 
 def _norm(label: str) -> str:
-    """Normalise for pattern matching: lowercase, collapse spaces, strip punct."""
     return re.sub(r'[^a-z0-9 ]', ' ', label.lower())
 
 
@@ -395,16 +466,16 @@ def _match(label: str, patterns: List[str]) -> bool:
 
 def _first(rows: RawTable, patterns: List[str],
            from_unit: str, to_unit: str) -> Optional[float]:
-    """Return the FY1 (current year) value of the first row matching patterns."""
     for r in rows:
         if r['label'] and _match(r['label'], patterns):
-            return _convert(_parse_number(r['raw1']), from_unit, to_unit)
+            val = _convert(_parse_number(r['raw1']), from_unit, to_unit)
+            if val is not None:
+                return val
     return None
 
 
 def _first2(rows: RawTable, patterns: List[str],
             from_unit: str, to_unit: str) -> Tuple[Optional[float], Optional[float]]:
-    """Return (FY1, FY2) values of the first matching row."""
     for r in rows:
         if r['label'] and _match(r['label'], patterns):
             v1 = _convert(_parse_number(r['raw1']), from_unit, to_unit)
@@ -413,51 +484,159 @@ def _first2(rows: RawTable, patterns: List[str],
     return None, None
 
 
-def _rows_for_year(rows: RawTable, year_col: int,
-                   from_unit: str, to_unit: str) -> Dict[str, Optional[float]]:
-    """Build {normalised_label → value} dict for one year."""
-    out = {}
-    for r in rows:
-        if not r['label']:
-            continue
-        raw = r['raw1'] if year_col == 1 else r['raw2']
-        val = _convert(_parse_number(raw), from_unit, to_unit)
-        out[_norm(r['label'])] = val
-    return out
+# ---- Income Statement mapper ------------------------------------------------
 
-
-# ── Income Statement mapper ────────────────────────────────────────────────────
-
-_IS_FIELDS = {
-    "revenue":                  [r"revenue from operations", r"net sales", r"net revenue"],
-    "other_income":             [r"other income"],
-    "cost_of_goods_sold":       [r"cost of materials consumed", r"cost of goods sold",
-                                 r"raw material", r"cost of material"],
-    "purchases_trading":        [r"purchases of stock.in.trade", r"purchases of traded goods",
-                                 r"purchase of stock"],
-    "changes_in_inventory":     [r"changes in inventor", r"change in stock",
-                                 r"increase decrease in inventor"],
-    "employee_expenses":        [r"employee benefit", r"employee cost", r"staff cost",
-                                 r"remuneration"],
-    "finance_costs":            [r"finance cost", r"interest expense", r"finance charge",
-                                 r"financial cost"],
-    "depreciation_amortization":[r"depreciation and amortis", r"depreciation and amortiz",
-                                 r"depreciation depletion"],
-    "other_expenses":           [r"other expense"],
-    "total_expenses":           [r"total expense"],
-    "profit_before_tax":        [r"profit before tax", r"earnings before tax", r"\bpbt\b"],
-    "tax_expense":              [r"tax expense", r"income tax expense", r"total tax"],
-    "current_tax":              [r"current tax"],
-    "deferred_tax":             [r"deferred tax"],
-    "pat":                      [r"profit for the year", r"profit after tax",
-                                 r"net profit", r"profit for period",
-                                 r"total comprehensive income"],
+_IS_FIELDS: Dict[str, List[str]] = {
+    "revenue": [
+        # Indian formats
+        r"revenue from operations",
+        r"net sales",
+        r"net revenue",
+        r"total revenue",
+        r"total net revenue",
+        r"revenues",
+        r"^revenue$",
+        r"turnover",
+        r"net turnover",
+        r"gross revenue",
+        r"sales revenue",
+        r"income from operations",
+        r"total income from operations",
+        r"total net sales",
+        r"net sales and revenues",
+        # US / international formats
+        r"^sales$",
+        r"total sales",
+        r"product sales",
+        r"service revenue",
+        r"total revenues",
+    ],
+    "other_income": [
+        r"other income",
+        r"other operating income",
+        r"other revenue",
+        r"non.operating income",
+    ],
+    "cost_of_goods_sold": [
+        r"cost of materials consumed",
+        r"cost of goods sold",
+        r"cost of revenue",
+        r"cost of sales",
+        r"cost of products sold",
+        r"raw material",
+        r"cost of material",
+        r"cost of services",
+        r"direct cost",
+    ],
+    "purchases_trading": [
+        r"purchases of stock.in.trade",
+        r"purchases of traded goods",
+        r"purchase of stock",
+        r"trading purchases",
+    ],
+    "changes_in_inventory": [
+        r"changes in inventor",
+        r"change in stock",
+        r"increase.decrease in inventor",
+        r"(increase) decrease in inventor",
+    ],
+    "employee_expenses": [
+        r"employee benefit",
+        r"employee cost",
+        r"staff cost",
+        r"remuneration",
+        r"personnel expense",
+        r"salaries and wages",
+        r"compensation and benefits",
+        r"labor and related",
+    ],
+    "finance_costs": [
+        r"finance cost",
+        r"finance charges",
+        r"interest expense",
+        r"financial cost",
+        r"interest and bank charges",
+        r"net interest expense",
+    ],
+    "depreciation_amortization": [
+        r"depreciation and amortis",
+        r"depreciation and amortiz",
+        r"depreciation.*amortization",
+        r"depreciation depletion",
+        r"amortization and depreciation",
+        r"depreciation.*depletion.*amortiz",
+        r"^depreciation$",
+    ],
+    "other_expenses": [
+        r"other expense",
+        r"other operating expense",
+        r"general.*administrative",
+        r"selling.*general.*administrative",
+        r"selling.*marketing",
+        r"distribution expense",
+        r"administrative expense",
+    ],
+    "total_expenses": [
+        r"total expense",
+        r"total operating expense",
+        r"total costs and expense",
+    ],
+    "gross_profit": [
+        r"gross profit",
+        r"gross margin",
+        r"gross income",
+    ],
+    "ebitda": [
+        r"\bebitda\b",
+        r"earnings before interest.*tax.*depreciation",
+    ],
+    "profit_before_tax": [
+        r"profit before tax",
+        r"earnings before tax",
+        r"income before.*tax",
+        r"profit before income tax",
+        r"\bpbt\b",
+        r"\bebt\b",
+        r"income before provision",
+    ],
+    "tax_expense": [
+        r"tax expense",
+        r"income tax expense",
+        r"provision for.*tax",
+        r"income tax provision",
+        r"total tax",
+        r"total income tax",
+    ],
+    "pat": [
+        r"profit for the year",
+        r"profit after tax",
+        r"net profit",
+        r"profit for period",
+        r"net income",
+        r"net earnings",
+        r"profit attributable",
+        r"total comprehensive income",
+        r"net income attributable",
+    ],
+    "eps_basic": [
+        r"basic.*earnings per share",
+        r"basic.*eps",
+        r"earnings per share.*basic",
+    ],
+    "eps_diluted": [
+        r"diluted.*earnings per share",
+        r"diluted.*eps",
+        r"earnings per share.*diluted",
+    ],
 }
 
 
 def map_income_statement(rows: RawTable, from_unit: str, to_unit: str,
                          fiscal_year: int) -> IncomeStatement:
     g = lambda *pats: _first(rows, list(pats), from_unit, to_unit)
+
+    labels = [r['label'] for r in rows if r['label']]
+    log.info(f"[LocalPDF] P&L row labels (fy={fiscal_year}): {labels}")
 
     revenue      = g(*_IS_FIELDS["revenue"])
     other_income = g(*_IS_FIELDS["other_income"])
@@ -468,26 +647,46 @@ def map_income_statement(rows: RawTable, from_unit: str, to_unit: str,
     finance      = g(*_IS_FIELDS["finance_costs"])
     depn         = g(*_IS_FIELDS["depreciation_amortization"])
     other_exp    = g(*_IS_FIELDS["other_expenses"])
+    total_exp    = g(*_IS_FIELDS["total_expenses"])
+    gross_profit = g(*_IS_FIELDS["gross_profit"])
     pbt          = g(*_IS_FIELDS["profit_before_tax"])
     tax          = g(*_IS_FIELDS["tax_expense"])
     pat          = g(*_IS_FIELDS["pat"])
+    eps_basic    = g(*_IS_FIELDS["eps_basic"])
+    eps_diluted  = g(*_IS_FIELDS["eps_diluted"])
 
-    # Gross profit = Revenue - COGS - inventory change - purchases
-    gross_profit: Optional[float] = None
-    if revenue is not None:
+    # Derived: revenue from gross profit + COGS when revenue line is missing
+    # (common in US reports where the revenue row is on a prior page)
+    if revenue is None and gross_profit is not None and cogs is not None:
+        revenue = gross_profit + abs(cogs)
+        log.info(f"[LocalPDF] Revenue derived from GrossProfit+COGS: {revenue}")
+
+    # Derived: gross profit if not directly available
+    if gross_profit is None and revenue is not None:
         deductions = sum(x for x in [cogs, purchases, inv_chg] if x is not None)
-        gross_profit = revenue - deductions if deductions else None
+        if deductions:
+            gross_profit = revenue - deductions
 
-    # EBITDA = PBT + finance + depreciation  (bottom-up build)
+    # Derived: EBITDA bottom-up
     ebitda: Optional[float] = None
     if pbt is not None:
         add_backs = sum(x for x in [finance, depn] if x is not None)
-        ebitda = pbt + add_backs if add_backs else None
+        if add_backs:
+            ebitda = pbt + add_backs
 
-    # EBIT = EBITDA - depreciation
+    # Derived: EBIT
     ebit: Optional[float] = None
     if ebitda is not None and depn is not None:
         ebit = ebitda - depn
+
+    # Confidence: penalise if key fields missing
+    conf = 0.92
+    if revenue is None:
+        conf -= 0.25
+    if pat is None:
+        conf -= 0.10
+    if pbt is None:
+        conf -= 0.05
 
     return IncomeStatement(
         fiscal_year=fiscal_year,
@@ -504,160 +703,125 @@ def map_income_statement(rows: RawTable, from_unit: str, to_unit: str,
         pbt=pbt,
         tax_expense=tax,
         pat=pat,
-        extraction_confidence=0.88,
+        eps_basic=eps_basic,
+        eps_diluted=eps_diluted,
+        extraction_confidence=round(conf, 3),
     )
 
 
-# ── Balance Sheet mapper ───────────────────────────────────────────────────────
-
-_BS_FIELDS = {
-    # Assets
-    "ppe":                  [r"property plant and equipment", r"tangible asset",
-                             r"fixed asset", r"property  plant"],
-    "capital_wip":          [r"capital work.in.progress", r"cwip"],
-    "goodwill":             [r"\bgoodwill\b"],
-    "intangible_assets":    [r"other intangible", r"intangible asset"],
-    "right_of_use":         [r"right.of.use", r"rou asset"],
-    "non_current_invest":   [r"financial asset.*investment", r"long.term investment",
-                             r"non.current.*investment"],
-    "deferred_tax_assets":  [r"deferred tax asset"],
-    "other_nc_assets":      [r"other non.current asset"],
-    "inventories":          [r"\binventor", r"\bstock\b"],
-    "trade_receivables":    [r"trade receivable", r"debtor", r"accounts receivable"],
-    "cash":                 [r"cash and cash equivalent"],
-    "bank_balances":        [r"bank balance"],
-    "current_invest":       [r"current investment", r"short.term investment"],
-    "other_current_assets": [r"other current asset"],
-    "total_nc_assets":      [r"total non.current asset"],
-    "total_current_assets": [r"total current asset"],
-    "total_assets":         [r"total asset"],
-    # Equity
-    "share_capital":        [r"equity share capital", r"share capital"],
-    "other_equity":         [r"other equity", r"reserves and surplus"],
-    "nci":                  [r"non.controlling interest", r"minority interest"],
-    "total_equity":         [r"total equity"],
-    # Liabilities
-    "lt_borrowings":        [r"borrowing"],   # detected by section context below
-    "lease_nc":             [r"lease liabilit"],
-    "deferred_tax_liab":    [r"deferred tax liabilit"],
-    "other_nc_liab":        [r"other non.current liabilit"],
-    "total_nc_liab":        [r"total non.current liabilit"],
-    "st_borrowings":        [r"borrowing"],   # detected by section context
-    "trade_payables":       [r"trade payable", r"creditor", r"accounts payable"],
-    "other_current_liab":   [r"other current liabilit"],
-    "total_current_liab":   [r"total current liabilit"],
-    "total_liab":           [r"total liabilit"],
-    "total_equity_liab":    [r"total equity and liabilit", r"total liabilit.*equity"],
-}
-
+# ---- Balance Sheet mapper ---------------------------------------------------
 
 def map_balance_sheet(rows: RawTable, from_unit: str, to_unit: str,
                       fiscal_year: int) -> BalanceSheet:
-    # Section context: track if we're in assets / non-current-liab / current-liab
-    section = "unknown"
-    nc_liab_section = False
-    curr_liab_section = False
+    """Section-aware BS mapper. Tracks current section to disambiguate borrowings."""
 
-    # Values dict by normalised label
-    vals: Dict[str, Optional[float]] = {}
+    section = "unknown"
+    vals_by_section: Dict[str, Dict[str, Optional[float]]] = {
+        "assets": {}, "nc_liab": {}, "curr_liab": {}, "equity": {}, "unknown": {}
+    }
+    vals_flat: Dict[str, Optional[float]] = {}
+
     for r in rows:
         lbl = r['label']
         if not lbl:
             continue
         n = _norm(lbl)
-        # Detect section changes
-        if re.search(r'\bassets\b', n):
+        v = _convert(_parse_number(r['raw1']), from_unit, to_unit)
+
+        # Update section
+        if re.search(r'\b(total )?assets\b', n) and not re.search(r'liabilit', n):
             section = "assets"
-            nc_liab_section = False; curr_liab_section = False
         elif re.search(r'non.current liabilit', n):
             section = "nc_liab"
-            nc_liab_section = True; curr_liab_section = False
         elif re.search(r'current liabilit', n) and 'non' not in n:
             section = "curr_liab"
-            nc_liab_section = False; curr_liab_section = True
-        vals[n] = _convert(_parse_number(r['raw1']), from_unit, to_unit)
+        elif re.search(r'\bequity\b', n) and not re.search(r'liabilit', n):
+            section = "equity"
+
+        vals_by_section[section][n] = v
+        vals_flat[n] = v
 
     def g(*patterns: str) -> Optional[float]:
         for pat in patterns:
-            for key, val in vals.items():
+            for key, val in vals_flat.items():
                 if re.search(pat, key) and val is not None:
                     return val
         return None
 
-    def g_section(section_check: str, *patterns: str) -> Optional[float]:
-        """Match a pattern only within rows that were in a specific section."""
-        in_correct_section = False
-        for r in rows:
-            lbl = r['label']
-            if not lbl:
-                continue
-            n = _norm(lbl)
-            # update section tracker
-            if re.search(r'\bassets\b', n):
-                in_correct_section = (section_check == "assets")
-            elif re.search(r'non.current liabilit', n):
-                in_correct_section = (section_check == "nc_liab")
-            elif re.search(r'current liabilit', n) and 'non' not in n:
-                in_correct_section = (section_check == "curr_liab")
-
-            if in_correct_section:
-                for pat in patterns:
-                    if re.search(pat, n):
-                        val = _convert(_parse_number(r['raw1']), from_unit, to_unit)
-                        if val is not None:
-                            return val
+    def g_sec(sec: str, *patterns: str) -> Optional[float]:
+        for pat in patterns:
+            for key, val in vals_by_section.get(sec, {}).items():
+                if re.search(pat, key) and val is not None:
+                    return val
         return None
 
     # Assets
-    ppe             = g(r"property plant and equipment", r"tangible asset", r"fixed asset")
-    cwip            = g(r"capital work.in.progress")
+    ppe             = g(r"property.*plant.*equipment", r"property and equipment",
+                        r"tangible asset", r"fixed asset", r"net property")
+    cwip            = g(r"capital work.in.progress", r"cwip", r"construction in progress")
     goodwill        = g(r"\bgoodwill\b")
-    intangibles     = g(r"other intangible", r"intangible asset")
-    rou             = g(r"right.of.use", r"rou asset")
-    nc_invest       = g(r"non.current.*investment", r"long.term investment")
+    intangibles     = g(r"other intangible", r"intangible asset", r"intangibles, net")
+    rou             = g(r"right.of.use", r"rou asset", r"operating lease.*right")
+    nc_invest       = g(r"non.current.*investment", r"long.term investment",
+                        r"financial asset.*investment")
     dta             = g(r"deferred tax asset")
-    other_nc_assets = g(r"other non.current asset")
-    total_nc_assets = g(r"total non.current asset")
-    inventories     = g(r"\binventor")
-    receivables     = g(r"trade receivable", r"debtor")
-    cash            = g(r"cash and cash equivalent")
-    bank_bal        = g(r"bank balance other", r"other bank balance")
-    curr_invest     = g(r"current investment", r"short.term investment")
-    other_curr_ass  = g(r"other current asset")
+    other_nc_assets = g(r"other non.current asset", r"other long.term asset")
+    total_nc_assets = g(r"total non.current asset", r"total long.term asset")
+    inventories     = g(r"\binventor", r"\bstock\b")
+    receivables     = g(r"trade receivable", r"accounts receivable", r"debtor",
+                        r"receivables, net")
+    cash            = g(r"cash and cash equivalent", r"cash and short.term investment",
+                        r"cash, cash equivalent")
+    bank_bal        = g(r"other bank balance", r"bank balance other")
+    curr_invest     = g(r"current investment", r"short.term investment",
+                        r"marketable securities", r"short.term marketable")
+    other_curr_ass  = g(r"other current asset", r"prepaid.*other")
     total_curr_ass  = g(r"total current asset")
     total_assets    = g(r"total asset")
 
     # Equity
-    share_capital   = g(r"equity share capital", r"share capital")
-    other_equity    = g(r"other equity", r"reserves and surplus")
+    share_capital   = g(r"equity share capital", r"share capital", r"common stock",
+                        r"ordinary shares", r"paid.in capital")
+    other_equity    = g(r"other equity", r"reserves and surplus", r"retained earnings",
+                        r"accumulated.*deficit", r"additional paid.in",
+                        r"shareholder.*equity", r"stockholder.*equity")
     nci             = g(r"non.controlling interest", r"minority interest")
-    total_equity    = g(r"total equity")
+    total_equity    = g(r"total equity", r"total stockholder", r"total shareholder",
+                        r"total owners.*equity")
 
-    # Liabilities (section-aware)
-    lt_borrow       = g_section("nc_liab",    r"\bborrowing")
-    st_borrow       = g_section("curr_liab",  r"\bborrowing")
-    lease_nc        = g_section("nc_liab",    r"lease liabilit")
-    lease_curr      = g_section("curr_liab",  r"lease liabilit")
-    dt_liab         = g(r"deferred tax liabilit")
-    other_nc_liab   = g(r"other non.current liabilit")
-    total_nc_liab   = g(r"total non.current liabilit")
-    trade_payables  = g(r"trade payable", r"creditor")
-    other_curr_liab = g(r"other current liabilit")
-    total_curr_liab = g(r"total current liabilit")
+    # Liabilities (section-aware to disambiguate borrowings)
+    lt_borrow    = g_sec("nc_liab", r"\bborrowing", r"long.term debt", r"long.term loan",
+                         r"notes payable", r"debenture", r"bonds payable")
+    st_borrow    = g_sec("curr_liab", r"\bborrowing", r"short.term debt",
+                         r"current.*long.term debt", r"current portion.*debt",
+                         r"short.term loan", r"commercial paper")
+    lease_nc     = g_sec("nc_liab", r"lease liabilit", r"finance lease")
+    lease_curr   = g_sec("curr_liab", r"lease liabilit")
+    dt_liab      = g(r"deferred tax liabilit")
+    other_nc_liab = g(r"other non.current liabilit", r"other long.term liabilit")
+    total_nc_liab = g(r"total non.current liabilit", r"total long.term liabilit")
+    trade_pay    = g(r"trade payable", r"accounts payable", r"creditor")
+    other_cl     = g(r"other current liabilit", r"accrued.*liabilit",
+                     r"accrued expense", r"accrued and other")
+    total_cl     = g(r"total current liabilit")
 
-    # Net debt computation
     total_debt: Optional[float] = None
     if lt_borrow is not None or st_borrow is not None:
         total_debt = (lt_borrow or 0) + (st_borrow or 0)
 
-    short_invest = curr_invest
     net_debt: Optional[float] = None
     if total_debt is not None and cash is not None:
-        net_debt = total_debt - cash - (bank_bal or 0) - (short_invest or 0)
+        net_debt = total_debt - cash - (bank_bal or 0) - (curr_invest or 0)
+
+    # Confidence: penalise for missing totals
+    conf = 0.92
+    if total_assets is None:
+        conf -= 0.10
+    if total_equity is None:
+        conf -= 0.05
 
     return BalanceSheet(
         fiscal_year=fiscal_year,
-        # Non-current assets (using actual model field names)
         net_fixed_assets=ppe,
         capital_wip=cwip,
         goodwill=goodwill,
@@ -666,7 +830,6 @@ def map_balance_sheet(rows: RawTable, from_unit: str, to_unit: str,
         deferred_tax_assets=dta,
         other_non_current_assets=other_nc_assets,
         total_non_current_assets=total_nc_assets,
-        # Current assets
         inventory=inventories,
         accounts_receivable=receivables,
         cash_and_equivalents=cash,
@@ -674,71 +837,87 @@ def map_balance_sheet(rows: RawTable, from_unit: str, to_unit: str,
         other_current_assets=other_curr_ass,
         total_current_assets=total_curr_ass,
         total_assets=total_assets,
-        # Equity
         share_capital=share_capital,
         reserves_and_surplus=other_equity,
         minority_interest=nci,
         total_equity=total_equity,
-        # Non-current liabilities
         long_term_debt=lt_borrow,
         deferred_tax_liabilities=dt_liab,
         other_non_current_liabilities=other_nc_liab,
         total_non_current_liabilities=total_nc_liab,
-        # Current liabilities
         short_term_borrowings=st_borrow,
-        accounts_payable=trade_payables,
-        other_current_liabilities=other_curr_liab,
-        total_current_liabilities=total_curr_liab,
-        # Totals
+        accounts_payable=trade_pay,
+        other_current_liabilities=other_cl,
+        total_current_liabilities=total_cl,
         total_liabilities_and_equity=total_assets,
-        extraction_confidence=0.88,
+        extraction_confidence=round(conf, 3),
     )
 
 
-# ── Cash Flow mapper ───────────────────────────────────────────────────────────
+# ---- Cash Flow mapper -------------------------------------------------------
 
 def map_cash_flow(rows: RawTable, from_unit: str, to_unit: str,
                   fiscal_year: int) -> CashFlowStatement:
-    def g(*patterns: str) -> Optional[float]:
-        return _first(rows, list(patterns), from_unit, to_unit)
+    g = lambda *pats: _first(rows, list(pats), from_unit, to_unit)
 
-    pbt         = g(r"profit before tax")
-    depn        = g(r"depreciation and amortis", r"depreciation and amortiz")
-    finance_adj = g(r"finance cost")          # adjustment in OCF
+    pbt         = g(r"profit before tax", r"income before.*tax", r"net income before tax")
+    depn        = g(r"depreciation and amortis", r"depreciation and amortiz",
+                    r"depreciation.*amortization", r"^depreciation$",
+                    r"depreciation depletion")
     cfo         = g(r"net cash.*from operating", r"net cash generated from operating",
-                    r"net cash.*operating activit")
+                    r"net cash.*operating activit", r"net cash provided by operating",
+                    r"cash flow from operation", r"net cash from operation")
     capex       = g(r"purchase of property", r"additions to.*property",
                     r"capital expenditure", r"purchase.*ppe",
-                    r"acquisition.*property plant")
-    asset_sale  = g(r"proceeds.*sale.*property", r"proceeds from disposal")
-    buy_invest  = g(r"purchase.*investment", r"acquisition.*investment")
-    sell_invest = g(r"proceeds.*sale.*investment", r"proceeds.*investment")
-    int_recv    = g(r"interest received", r"interest income received")
+                    r"acquisition.*property plant",
+                    r"capital expenditures",
+                    r"purchases of property",
+                    r"purchase.*equipment",
+                    r"property.*plant.*equipment.*purchased")
+    asset_sale  = g(r"proceeds.*sale.*property", r"proceeds from disposal",
+                    r"sale of property", r"proceeds.*property.*plant")
+    buy_invest  = g(r"purchase.*investment", r"acquisition.*investment",
+                    r"purchase.*marketable securities")
+    sell_invest = g(r"proceeds.*sale.*investment", r"proceeds.*investment",
+                    r"maturities.*marketable securities")
     div_recv    = g(r"dividend received")
+    int_recv    = g(r"interest received", r"interest income received")
     cfi         = g(r"net cash.*from investing", r"net cash used in investing",
-                    r"net cash.*investing activit")
-    proc_borrow = g(r"proceeds from borrowing")
-    repay_borrow= g(r"repayment of borrowing")
-    div_paid    = g(r"dividend paid", r"dividends paid")
-    int_paid    = g(r"interest paid", r"finance cost paid",
-                    r"repayment.*principal.*lease")
+                    r"net cash.*investing activit", r"net cash provided by investing",
+                    r"cash flow from investing")
+    proc_borrow = g(r"proceeds from borrowing", r"proceeds from.*debt",
+                    r"proceeds from.*loan", r"proceeds from issuance.*debt")
+    repay_borrow = g(r"repayment of borrowing", r"repayment.*loan",
+                     r"repayment.*debt", r"payment.*long.term debt")
+    div_paid    = g(r"dividend paid", r"dividends paid", r"payment.*dividend")
+    int_paid    = g(r"interest paid", r"finance cost paid")
+    buyback     = g(r"repurchase.*share", r"buyback", r"share repurchase",
+                    r"repurchase of common")
     cff         = g(r"net cash.*from financing", r"net cash used in financing",
-                    r"net cash.*financing activit")
-    open_cash   = g(r"cash.*beginning", r"opening.*cash", r"cash.*at.*beginning")
-    close_cash  = g(r"cash.*end", r"closing.*cash", r"cash.*at.*end")
+                    r"net cash.*financing activit", r"net cash provided by financing",
+                    r"cash flow from financing")
+    open_cash   = g(r"cash.*beginning", r"opening.*cash", r"cash.*at.*beginning",
+                    r"cash.*start of")
+    close_cash  = g(r"cash.*end", r"closing.*cash", r"cash.*at.*end",
+                    r"cash.*end of year", r"cash.*end of period")
 
-    # FCF = CFO - Capex
     fcf: Optional[float] = None
     if cfo is not None and capex is not None:
-        fcf = cfo + capex     # capex is typically negative in CF statement
+        fcf = cfo + capex
 
     net_change: Optional[float] = None
     if open_cash is not None and close_cash is not None:
         net_change = close_cash - open_cash
 
+    conf = 0.90
+    if cfo is None:
+        conf -= 0.15
+    if capex is None:
+        conf -= 0.05
+
     return CashFlowStatement(
         fiscal_year=fiscal_year,
-        net_income=pbt,                         # closest approximation before tax
+        net_income=pbt,
         depreciation_amortization=depn,
         cash_from_operations=cfo,
         capex=capex,
@@ -747,16 +926,41 @@ def map_cash_flow(rows: RawTable, from_unit: str, to_unit: str,
         debt_raised=proc_borrow,
         debt_repaid=repay_borrow,
         dividends_paid=div_paid,
+        share_buyback=buyback,
         cash_from_financing=cff,
         net_change_in_cash=net_change,
         opening_cash=open_cash,
         closing_cash=close_cash,
         free_cash_flow=fcf,
-        extraction_confidence=0.86,
+        extraction_confidence=round(conf, 3),
     )
 
 
-# ── Public API ─────────────────────────────────────────────────────────────────
+# ---- Year-column helper -----------------------------------------------------
+
+def _year_cols_for_stmt(y1: int, y2: int, supplied: List[int]) -> List[Tuple[int, int]]:
+    """
+    Decide which (fiscal_year, col) pairs to extract.
+    - If y1 != y2: use both columns filtered to supplied years.
+    - If y1 == y2 (duplicate header): use col=1 with the latest supplied year.
+    - Fallback: if nothing matched but we have rows, use col=1 with latest supplied.
+    """
+    pairs: List[Tuple[int, int]] = []
+    if y1 and y2 and y1 != y2:
+        for yr, col in [(y1, 1), (y2, 2)]:
+            if not supplied or yr in supplied:
+                pairs.append((yr, col))
+    elif y1 and (not supplied or y1 in supplied):
+        pairs.append((y1, 1))
+
+    if not pairs and supplied and (y1 or y2):
+        # Fallback: use latest supplied year with col 1
+        pairs.append((supplied[-1], 1))
+
+    return pairs
+
+
+# ---- Public API -------------------------------------------------------------
 
 def extract_local(
     path: str,
@@ -781,47 +985,46 @@ def extract_local(
         page_map = scan_for_statement_pages(pdf, target_years=fiscal_years)
         log.info(f"[LocalPDF] Statement pages found: {page_map}")
 
-        # ── Income Statement ──────────────────────────────────────────────
+        # ---- Income Statement
         if page_map.get("pl"):
             rows, from_unit, y1, y2 = extract_table_from_pages(pdf, page_map["pl"])
             log.info(f"[LocalPDF] P&L: {len(rows)} rows, unit={from_unit}, years={y1},{y2}")
-            for yr, col, py in [(y1, 1, fiscal_years), (y2, 2, fiscal_years)]:
-                if yr and (not fiscal_years or yr in fiscal_years):
-                    stmt_rows = [{**r, "raw1": r["raw1"] if col == 1 else r["raw2"]} for r in rows]
-                    is_ = map_income_statement(stmt_rows, from_unit, unit, yr)
-                    income_statements.append(is_)
+            for yr, col in _year_cols_for_stmt(y1, y2, fiscal_years):
+                stmt_rows = [{**r, "raw1": r["raw1"] if col == 1 else r["raw2"]} for r in rows]
+                income_statements.append(map_income_statement(stmt_rows, from_unit, unit, yr))
 
-        # ── Balance Sheet ─────────────────────────────────────────────────
+        # ---- Balance Sheet
         if page_map.get("bs"):
             rows, from_unit, y1, y2 = extract_table_from_pages(pdf, page_map["bs"])
             log.info(f"[LocalPDF] BS:  {len(rows)} rows, unit={from_unit}, years={y1},{y2}")
-            for yr, col in [(y1, 1), (y2, 2)]:
-                if yr and (not fiscal_years or yr in fiscal_years):
-                    stmt_rows = [{**r, "raw1": r["raw1"] if col == 1 else r["raw2"]} for r in rows]
-                    bs_ = map_balance_sheet(stmt_rows, from_unit, unit, yr)
-                    balance_sheets.append(bs_)
+            for yr, col in _year_cols_for_stmt(y1, y2, fiscal_years):
+                stmt_rows = [{**r, "raw1": r["raw1"] if col == 1 else r["raw2"]} for r in rows]
+                balance_sheets.append(map_balance_sheet(stmt_rows, from_unit, unit, yr))
 
-        # ── Cash Flow ─────────────────────────────────────────────────────
+        # ---- Cash Flow
         if page_map.get("cf"):
             rows, from_unit, y1, y2 = extract_table_from_pages(pdf, page_map["cf"])
             log.info(f"[LocalPDF] CF:  {len(rows)} rows, unit={from_unit}, years={y1},{y2}")
-            for yr, col in [(y1, 1), (y2, 2)]:
-                if yr and (not fiscal_years or yr in fiscal_years):
-                    stmt_rows = [{**r, "raw1": r["raw1"] if col == 1 else r["raw2"]} for r in rows]
-                    cf_ = map_cash_flow(stmt_rows, from_unit, unit, yr)
-                    cash_flows.append(cf_)
+            for yr, col in _year_cols_for_stmt(y1, y2, fiscal_years):
+                stmt_rows = [{**r, "raw1": r["raw1"] if col == 1 else r["raw2"]} for r in rows]
+                cash_flows.append(map_cash_flow(stmt_rows, from_unit, unit, yr))
 
-    # Build FinancialData
     all_years = sorted(set(
         [s.fiscal_year for s in income_statements] +
         [s.fiscal_year for s in balance_sheets] +
         [s.fiscal_year for s in cash_flows]
     ))
 
-    avg_conf = 0.88
     all_stmts = income_statements + balance_sheets + cash_flows
-    if all_stmts:
-        avg_conf = sum(s.extraction_confidence for s in all_stmts) / len(all_stmts)
+    avg_conf = (sum(s.extraction_confidence for s in all_stmts) / len(all_stmts)
+                if all_stmts else 0.5)
+
+    # If P&L pages were found but revenue is still None, lower confidence
+    # so extractor.py triggers the Claude API gap-fill pass.
+    has_revenue = any(s.revenue is not None and s.revenue > 0 for s in income_statements)
+    if page_map.get("pl") and not has_revenue:
+        log.warning("[LocalPDF] P&L pages found but no revenue mapped — lowering confidence to trigger API gap-fill.")
+        avg_conf = min(avg_conf, 0.50)
 
     return FinancialData(
         company_name=company_name,
