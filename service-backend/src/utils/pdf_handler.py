@@ -3,7 +3,7 @@ PDF utility functions: load, encode, page-count, and page-range extraction.
 """
 import base64
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from pypdf import PdfReader, PdfWriter
 
@@ -63,3 +63,39 @@ def validate_pdf(path: str) -> bool:
         return True
     except Exception:
         return False
+
+
+def render_pdf_pages_to_images(
+    path: str,
+    pages: List[int],
+    dpi: int = 150,
+) -> List[str]:
+    """
+    Render specific PDF pages to JPEG images using pymupdf.
+    Returns a list of base64-encoded JPEG strings.
+
+    Args:
+        path:  Path to the PDF file.
+        pages: 1-based page numbers to render.
+        dpi:   Resolution for rendering (150 is a good quality/size balance).
+
+    Raises:
+        ImportError if pymupdf is not installed.
+    """
+    import fitz  # pymupdf
+
+    doc = fitz.open(path)
+    total = len(doc)
+    mat = fitz.Matrix(dpi / 72, dpi / 72)
+    results: List[str] = []
+
+    for page_num in pages:
+        idx = page_num - 1  # fitz uses 0-based indexing
+        if idx < 0 or idx >= total:
+            continue
+        pix = doc[idx].get_pixmap(matrix=mat, colorspace=fitz.csRGB)
+        img_bytes = pix.tobytes("jpeg")
+        results.append(base64.standard_b64encode(img_bytes).decode("utf-8"))
+
+    doc.close()
+    return results

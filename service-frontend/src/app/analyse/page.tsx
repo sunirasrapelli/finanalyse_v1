@@ -405,49 +405,57 @@ const PriorityBadge = ({ priority }: { priority: string }) => {
 // =====================================================
 // Pipeline Progress
 // =====================================================
-const PipelineProgress = ({ status }: { status: JobStatus }) => {
-  const defaultSteps = [
-    'Extract financial data',
-    'Generate commentary',
-    'Build Excel model',
-    'Generate Word report',
-    'Compute next steps',
-  ]
+const PIPELINE_STEPS = [
+  { key: 'extract',    label: 'Extract Financial Data' },
+  { key: 'commentary', label: 'Generate AI Commentary' },
+  { key: 'excel',      label: 'Build Excel Model' },
+  { key: 'report',     label: 'Generate Word Report' },
+  { key: 'next_steps', label: 'Compute Next Steps' },
+]
 
-  const logEntries = status.progress ?? status.log ?? []
+const PipelineProgress = ({ status }: { status: JobStatus | null }) => {
+  const logEntries = status?.progress ?? status?.log ?? []
+
+  const stepStates = PIPELINE_STEPS.map((step) => {
+    const entries = logEntries.filter((e) => e.step === step.key)
+    const isDone    = entries.some((e) => e.done)
+    const isRunning = entries.length > 0 && !isDone
+    const latestMsg = entries.length > 0 ? entries[entries.length - 1].message : null
+    return { ...step, isDone, isRunning, latestMsg }
+  })
+
+  const company = status?.company_name || 'your document'
 
   return (
-    <div className="pipeline-progress">
-      <h3>
-        <Loader2 size={16} className="spin" style={{ marginRight: '0.5rem', display: 'inline' }} />
-        Analysing {status.company_name || 'your document'}...
-      </h3>
+    <div className="pipeline-v2">
+      <div className="pipeline-v2-header">
+        <Loader2 size={16} className="spin pipeline-v2-spinner" />
+        <span>Analysing {company}...</span>
+      </div>
 
-      <div className="progress-steps">
-        {logEntries.length > 0
-          ? logEntries.map((entry, i) => (
-              <div
-                key={i}
-                className={`progress-step ${entry.done ? 'done' : 'running'}`}
-              >
-                <span className="step-icon">
-                  {entry.done ? (
-                    <Check size={14} />
-                  ) : (
-                    <Loader2 size={14} className="spin" />
-                  )}
-                </span>
-                <span className="step-text">{entry.message}</span>
+      <div className="pipeline-v2-steps">
+        {stepStates.map((step, i) => {
+          const state   = step.isDone ? 'done' : step.isRunning ? 'running' : 'pending'
+          const isLast  = i === PIPELINE_STEPS.length - 1
+          return (
+            <div key={step.key} className="pipeline-v2-step">
+              <div className="pipeline-v2-left">
+                <div className={`pipeline-v2-circle pvc-${state}`}>
+                  {step.isDone ? <Check size={11} /> : <span>{i + 1}</span>}
+                </div>
+                {!isLast && (
+                  <div className={`pipeline-v2-line ${step.isDone ? 'pvl-done' : step.isRunning ? 'pvl-running' : ''}`} />
+                )}
               </div>
-            ))
-          : defaultSteps.map((step, i) => (
-              <div key={i} className="progress-step">
-                <span className="step-icon">
-                  <Loader2 size={14} className="spin" style={{ opacity: 0.4 }} />
-                </span>
-                <span className="step-text">{step}</span>
+              <div className="pipeline-v2-right">
+                <span className={`pipeline-v2-label pvtext-${state}`}>{step.label}</span>
+                {step.latestMsg && state !== 'pending' && (
+                  <span className="pipeline-v2-sub">{step.latestMsg}</span>
+                )}
               </div>
-            ))}
+            </div>
+          )
+        })}
       </div>
     </div>
   )
@@ -660,7 +668,7 @@ const EmptyMain = () => (
     </div>
     <h2>Upload a report to begin</h2>
     <p>
-      Select a PDF annual report on the left, fill in the company details,
+      Select a PDF annual report on the left,wait for the company details to be filled in automatically (or enter them yourself), and
       then click Run Analysis to generate your institutional-grade financial model.
     </p>
     <div className="placeholder-metrics">
@@ -944,18 +952,21 @@ export default function AnalysePage() {
     setIsDetecting(true)
     Promise.all(newPdfs.map((item) => autoDetect(item.file)))
       .then((results) => {
-        const mergedCompany =
-          results.find((r) => r.company_name)?.company_name || ''
-        const allYears = Array.from(
-          new Set(results.flatMap((r) => r.fiscal_years))
-        ).sort()
-        const mergedYears = allYears.length ? allYears.join(',') : ''
+        const detectedCompany = results.find((r) => r.company_name)?.company_name || ''
+        const detectedYears = results.flatMap((r) => r.fiscal_years)
 
-        setConfig((prev) => ({
-          ...prev,
-          companyName: prev.companyName || mergedCompany,
-          fiscalYears: prev.fiscalYears || mergedYears,
-        }))
+        setConfig((prev) => {
+          // Merge detected years with any already in the field
+          const existingYears = prev.fiscalYears
+            ? prev.fiscalYears.split(',').map((y) => parseInt(y.trim())).filter(Boolean)
+            : []
+          const merged = Array.from(new Set([...existingYears, ...detectedYears])).sort()
+          return {
+            ...prev,
+            companyName: prev.companyName || detectedCompany,
+            fiscalYears: merged.length ? merged.join(',') : prev.fiscalYears,
+          }
+        })
       })
       .catch(() => {/* silent - user can fill manually */})
       .finally(() => setIsDetecting(false))
@@ -1036,25 +1047,8 @@ export default function AnalysePage() {
         <main className="main-content">
           {pageState === 'idle' && <EmptyMain />}
 
-          {pageState === 'running' && jobStatus && (
+          {pageState === 'running' && (
             <PipelineProgress status={jobStatus} />
-          )}
-
-          {pageState === 'running' && !jobStatus && (
-            <div className="pipeline-progress">
-              <h3>
-                <Loader2 size={16} className="spin" style={{ marginRight: '0.5rem', display: 'inline' }} />
-                Starting analysis...
-              </h3>
-              <div className="progress-steps">
-                {['Uploading files', 'Initialising pipeline', 'Extracting data'].map((s, i) => (
-                  <div key={i} className="progress-step running">
-                    <span className="step-icon"><Loader2 size={14} className="spin" /></span>
-                    <span className="step-text">{s}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
           )}
 
           {pageState === 'done' && jobStatus && jobId && (

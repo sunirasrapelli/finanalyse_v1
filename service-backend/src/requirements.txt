@@ -17,6 +17,7 @@ openpyxl>=3.1.0
 # PDF Processing
 pypdf>=4.0.0
 pdfplumber>=0.10.0
+pymupdf>=1.24.0
 
 # Report Generation
 python-docx>=1.1.0

@@ -181,8 +181,9 @@ Runs as a FastAPI `BackgroundTask`; `job_id` returned immediately; frontend poll
 
 ```
 1. Extract    - pdfplumber (Pass 1) -> confidence scored per field
-               -> if aggregate confidence < 0.75: Claude API tool-use (Pass 2)
-               -> merge (local values win; API fills nulls only)
+               -> if aggregate confidence < 0.75 OR no revenue found: Claude API tool-use (Pass 2)
+               -> merge: iterate over UNION of local+API fiscal years; local values win; API fills nulls
+               -> _merge_stmt uses Pydantic model_fields (NOT dataclasses.fields - these are Pydantic models)
                -> validate relevance (reject if confidence < 0.25 or no revenue)
 
 2. Commentary - Claude API: 7-section narrative dict
@@ -411,8 +412,39 @@ Register with: `gh secret set <NAME> --repo nurixlabs/team-ppo-nahi-milega --bod
   - [x] Analysis page with upload, progress polling, downloads, chat widget
   - [x] Reports history page with filters and actions
   - [x] JWT auth flow (handleAuthCallback, localStorage, Bearer header)
+  - [x] Auto-detect on upload: PDF uploaded -> /auto-detect (first 5 pages) -> fills company name + fiscal years
+  - [x] Independent scroll panes on analyse page (sidebar + main content scroll separately)
+  - [x] Bug fixes: spinner animation, Image hydration, error field name alignment (error vs error_message)
 - [ ] Phase 7 - Deploy and verify (push to stage, smoke test on EKS)
 - [ ] Phase 8 - Tests (deferred; demo manually with Reliance FY2024 + Infosys FY2024)
+
+---
+
+## Known Bugs Fixed (do not reintroduce)
+
+- **`_merge_stmt` must use `type(stmt).model_fields`** - these are Pydantic v2 `BaseModel` instances; `dataclasses.fields()` will throw `TypeError` on them. This was the root cause of "yielded no revenue data".
+- **`_merge_extractions` must iterate over union of local+API years** - not just local years. Claude may find IS data for years pdfplumber didn't detect.
+- **Gap-fill trigger**: `needs_gap_fill = conf < CONFIDENCE_API_FALLBACK or not has_revenue` - must include `not has_revenue` condition so gap-fill runs even when pdfplumber confidence is high but revenue is missing.
+- **CSS spinner**: Never use `transform: translateY(-50%)` on a spinning element - `@keyframes spin` uses `transform: rotate()` and overwrites it. Use `top: calc(50% - Npx)` instead.
+- **Next.js Image**: Do not set CSS `width`/`height` on `<Image>` when `width`/`height` props are already set - causes hydration mismatch. Use only `style={{ objectFit: 'contain' }}`.
+
+---
+
+## Local Development
+
+```bash
+# Backend
+cd service-backend/src
+uvicorn web.app:app --reload --port 8000
+
+# Frontend
+cd service-frontend
+yarn dev   # or npm run dev
+```
+
+- Backend must be run from `service-backend/src/` (not `service-backend/`) - module imports are relative to `src/`
+- Frontend `.env.local` must be at `service-frontend/.env.local` with `NEXT_PUBLIC_API_URL=http://localhost:8000`
+- If port 8000 is in use: `lsof -ti:8000 | xargs kill -9`
 
 ---
 
@@ -427,3 +459,4 @@ Register with: `gh secret set <NAME> --repo nurixlabs/team-ppo-nahi-milega --bod
 - Do not hardcode Excel cell references or formula strings - use `formula_registry.py`
 - Do not hardcode Excel formatting - use `excel_styles.py` StyleBook
 - Do not add features beyond what is needed for a convincing demo
+- Do not use `dataclasses.fields()` on Pydantic models - use `model_fields` instead
