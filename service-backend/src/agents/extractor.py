@@ -41,6 +41,7 @@ from utils.pdf_handler import (
     extract_page_range_as_base64,
     get_pdf_page_count,
     load_pdf_as_base64,
+    render_pdf_pages_to_images,
     validate_pdf,
 )
 
@@ -165,7 +166,7 @@ def _call_extraction_api(
     raise ExtractionError("Claude did not return a tool_use block — extraction failed.")
 
 
-# ── Per-statement focused tools ───────────────────────────────────────────────
+# ── Parallel sub-agent extraction (3 focused Claude calls) ───────────────────
 
 _FLOAT_OR_NULL = {"type": ["number", "null"]}
 
@@ -183,31 +184,31 @@ _IS_TOOL = {
                 "items": {
                     "type": "object",
                     "properties": {
-                        "fiscal_year": {"type": "integer"},
-                        "revenue":                    {**_FLOAT_OR_NULL, "description": "Net sales / Net revenue / Revenue from operations — the TOP LINE"},
-                        "other_income":               _FLOAT_OR_NULL,
-                        "total_income":               _FLOAT_OR_NULL,
-                        "cogs":                       {**_FLOAT_OR_NULL, "description": "Cost of goods sold / Cost of sales / Cost of revenue — always positive"},
-                        "employee_expenses":          _FLOAT_OR_NULL,
-                        "other_operating_expenses":   _FLOAT_OR_NULL,
-                        "total_operating_expenses":   _FLOAT_OR_NULL,
-                        "gross_profit":               _FLOAT_OR_NULL,
-                        "ebitda":                     _FLOAT_OR_NULL,
-                        "depreciation_amortization":  {**_FLOAT_OR_NULL, "description": "Always positive"},
-                        "ebit":                       _FLOAT_OR_NULL,
-                        "interest_expense":           {**_FLOAT_OR_NULL, "description": "Finance costs — always positive"},
-                        "pbt":                        {**_FLOAT_OR_NULL, "description": "Profit/Income before tax"},
-                        "tax_expense":                {**_FLOAT_OR_NULL, "description": "Provision for income taxes — always positive"},
-                        "effective_tax_rate":         _FLOAT_OR_NULL,
-                        "pat":                        {**_FLOAT_OR_NULL, "description": "Net income / Profit after tax"},
-                        "minority_interest":          _FLOAT_OR_NULL,
-                        "pat_attributable":           _FLOAT_OR_NULL,
-                        "shares_outstanding":         _FLOAT_OR_NULL,
-                        "eps_basic":                  _FLOAT_OR_NULL,
-                        "eps_diluted":                _FLOAT_OR_NULL,
-                        "dividends_per_share":        _FLOAT_OR_NULL,
-                        "extraction_confidence":      {"type": "number", "minimum": 0, "maximum": 1},
-                        "extraction_notes":           {"type": ["string", "null"]},
+                        "fiscal_year":               {"type": "integer"},
+                        "revenue":                   {**_FLOAT_OR_NULL, "description": "Net sales / Revenue from operations — TOP LINE. If only Gross profit is visible, derive revenue = gross_profit + cost_of_sales."},
+                        "other_income":              _FLOAT_OR_NULL,
+                        "total_income":              _FLOAT_OR_NULL,
+                        "cogs":                      {**_FLOAT_OR_NULL, "description": "Cost of goods sold / Cost of sales — always positive"},
+                        "employee_expenses":         _FLOAT_OR_NULL,
+                        "other_operating_expenses":  _FLOAT_OR_NULL,
+                        "total_operating_expenses":  _FLOAT_OR_NULL,
+                        "gross_profit":              _FLOAT_OR_NULL,
+                        "ebitda":                    _FLOAT_OR_NULL,
+                        "depreciation_amortization": {**_FLOAT_OR_NULL, "description": "Always positive"},
+                        "ebit":                      _FLOAT_OR_NULL,
+                        "interest_expense":          {**_FLOAT_OR_NULL, "description": "Finance costs — always positive"},
+                        "pbt":                       {**_FLOAT_OR_NULL, "description": "Profit/Income before tax"},
+                        "tax_expense":               {**_FLOAT_OR_NULL, "description": "Provision for income taxes — always positive"},
+                        "effective_tax_rate":        _FLOAT_OR_NULL,
+                        "pat":                       {**_FLOAT_OR_NULL, "description": "Net income / Profit after tax"},
+                        "minority_interest":         _FLOAT_OR_NULL,
+                        "pat_attributable":          _FLOAT_OR_NULL,
+                        "shares_outstanding":        _FLOAT_OR_NULL,
+                        "eps_basic":                 _FLOAT_OR_NULL,
+                        "eps_diluted":               _FLOAT_OR_NULL,
+                        "dividends_per_share":       _FLOAT_OR_NULL,
+                        "extraction_confidence":     {"type": "number", "minimum": 0, "maximum": 1},
+                        "extraction_notes":          {"type": ["string", "null"]},
                     },
                     "required": ["fiscal_year"],
                 },
@@ -231,40 +232,40 @@ _BS_TOOL = {
                 "items": {
                     "type": "object",
                     "properties": {
-                        "fiscal_year":                  {"type": "integer"},
-                        "cash_and_equivalents":         _FLOAT_OR_NULL,
-                        "short_term_investments":       _FLOAT_OR_NULL,
-                        "accounts_receivable":          _FLOAT_OR_NULL,
-                        "inventory":                    _FLOAT_OR_NULL,
-                        "other_current_assets":         _FLOAT_OR_NULL,
-                        "total_current_assets":         _FLOAT_OR_NULL,
-                        "gross_fixed_assets":           _FLOAT_OR_NULL,
-                        "accumulated_depreciation":     _FLOAT_OR_NULL,
-                        "net_fixed_assets":             _FLOAT_OR_NULL,
-                        "capital_wip":                  _FLOAT_OR_NULL,
-                        "intangible_assets":            _FLOAT_OR_NULL,
-                        "goodwill":                     _FLOAT_OR_NULL,
-                        "long_term_investments":        _FLOAT_OR_NULL,
-                        "deferred_tax_assets":          _FLOAT_OR_NULL,
-                        "other_non_current_assets":     _FLOAT_OR_NULL,
-                        "total_non_current_assets":     _FLOAT_OR_NULL,
-                        "total_assets":                 _FLOAT_OR_NULL,
-                        "short_term_borrowings":        _FLOAT_OR_NULL,
-                        "accounts_payable":             _FLOAT_OR_NULL,
-                        "other_current_liabilities":    _FLOAT_OR_NULL,
-                        "total_current_liabilities":    _FLOAT_OR_NULL,
-                        "long_term_debt":               _FLOAT_OR_NULL,
-                        "deferred_tax_liabilities":     _FLOAT_OR_NULL,
-                        "other_non_current_liabilities":_FLOAT_OR_NULL,
-                        "total_non_current_liabilities":_FLOAT_OR_NULL,
-                        "total_liabilities":            _FLOAT_OR_NULL,
-                        "share_capital":                _FLOAT_OR_NULL,
-                        "reserves_and_surplus":         _FLOAT_OR_NULL,
-                        "minority_interest":            _FLOAT_OR_NULL,
-                        "total_equity":                 _FLOAT_OR_NULL,
-                        "total_liabilities_and_equity": _FLOAT_OR_NULL,
-                        "extraction_confidence":        {"type": "number", "minimum": 0, "maximum": 1},
-                        "extraction_notes":             {"type": ["string", "null"]},
+                        "fiscal_year":                   {"type": "integer"},
+                        "cash_and_equivalents":          _FLOAT_OR_NULL,
+                        "short_term_investments":        _FLOAT_OR_NULL,
+                        "accounts_receivable":           _FLOAT_OR_NULL,
+                        "inventory":                     _FLOAT_OR_NULL,
+                        "other_current_assets":          _FLOAT_OR_NULL,
+                        "total_current_assets":          _FLOAT_OR_NULL,
+                        "gross_fixed_assets":            _FLOAT_OR_NULL,
+                        "accumulated_depreciation":      _FLOAT_OR_NULL,
+                        "net_fixed_assets":              _FLOAT_OR_NULL,
+                        "capital_wip":                   _FLOAT_OR_NULL,
+                        "intangible_assets":             _FLOAT_OR_NULL,
+                        "goodwill":                      _FLOAT_OR_NULL,
+                        "long_term_investments":         _FLOAT_OR_NULL,
+                        "deferred_tax_assets":           _FLOAT_OR_NULL,
+                        "other_non_current_assets":      _FLOAT_OR_NULL,
+                        "total_non_current_assets":      _FLOAT_OR_NULL,
+                        "total_assets":                  _FLOAT_OR_NULL,
+                        "short_term_borrowings":         _FLOAT_OR_NULL,
+                        "accounts_payable":              _FLOAT_OR_NULL,
+                        "other_current_liabilities":     _FLOAT_OR_NULL,
+                        "total_current_liabilities":     _FLOAT_OR_NULL,
+                        "long_term_debt":                _FLOAT_OR_NULL,
+                        "deferred_tax_liabilities":      _FLOAT_OR_NULL,
+                        "other_non_current_liabilities": _FLOAT_OR_NULL,
+                        "total_non_current_liabilities": _FLOAT_OR_NULL,
+                        "total_liabilities":             _FLOAT_OR_NULL,
+                        "share_capital":                 _FLOAT_OR_NULL,
+                        "reserves_and_surplus":          _FLOAT_OR_NULL,
+                        "minority_interest":             _FLOAT_OR_NULL,
+                        "total_equity":                  _FLOAT_OR_NULL,
+                        "total_liabilities_and_equity":  _FLOAT_OR_NULL,
+                        "extraction_confidence":         {"type": "number", "minimum": 0, "maximum": 1},
+                        "extraction_notes":              {"type": ["string", "null"]},
                     },
                     "required": ["fiscal_year"],
                 },
@@ -288,29 +289,29 @@ _CF_TOOL = {
                 "items": {
                     "type": "object",
                     "properties": {
-                        "fiscal_year":               {"type": "integer"},
-                        "net_income":                _FLOAT_OR_NULL,
-                        "depreciation_amortization": _FLOAT_OR_NULL,
-                        "changes_in_working_capital":_FLOAT_OR_NULL,
+                        "fiscal_year":                {"type": "integer"},
+                        "net_income":                 _FLOAT_OR_NULL,
+                        "depreciation_amortization":  _FLOAT_OR_NULL,
+                        "changes_in_working_capital": _FLOAT_OR_NULL,
                         "other_operating_adjustments":_FLOAT_OR_NULL,
-                        "cash_from_operations":      _FLOAT_OR_NULL,
-                        "capex":                     {**_FLOAT_OR_NULL, "description": "Capital expenditure — NEGATIVE number"},
-                        "proceeds_from_asset_sales": _FLOAT_OR_NULL,
-                        "acquisitions":              _FLOAT_OR_NULL,
-                        "investments_net":           _FLOAT_OR_NULL,
-                        "cash_from_investing":       _FLOAT_OR_NULL,
-                        "debt_raised":               _FLOAT_OR_NULL,
-                        "debt_repaid":               _FLOAT_OR_NULL,
-                        "dividends_paid":            {**_FLOAT_OR_NULL, "description": "Negative number"},
-                        "share_issuance":            _FLOAT_OR_NULL,
-                        "share_buyback":             {**_FLOAT_OR_NULL, "description": "Negative number"},
-                        "cash_from_financing":       _FLOAT_OR_NULL,
-                        "net_change_in_cash":        _FLOAT_OR_NULL,
-                        "opening_cash":              _FLOAT_OR_NULL,
-                        "closing_cash":              _FLOAT_OR_NULL,
-                        "free_cash_flow":            _FLOAT_OR_NULL,
-                        "extraction_confidence":     {"type": "number", "minimum": 0, "maximum": 1},
-                        "extraction_notes":          {"type": ["string", "null"]},
+                        "cash_from_operations":       _FLOAT_OR_NULL,
+                        "capex":                      {**_FLOAT_OR_NULL, "description": "Capital expenditure — NEGATIVE number"},
+                        "proceeds_from_asset_sales":  _FLOAT_OR_NULL,
+                        "acquisitions":               _FLOAT_OR_NULL,
+                        "investments_net":            _FLOAT_OR_NULL,
+                        "cash_from_investing":        _FLOAT_OR_NULL,
+                        "debt_raised":                _FLOAT_OR_NULL,
+                        "debt_repaid":                _FLOAT_OR_NULL,
+                        "dividends_paid":             {**_FLOAT_OR_NULL, "description": "Negative number"},
+                        "share_issuance":             _FLOAT_OR_NULL,
+                        "share_buyback":              {**_FLOAT_OR_NULL, "description": "Negative number"},
+                        "cash_from_financing":        _FLOAT_OR_NULL,
+                        "net_change_in_cash":         _FLOAT_OR_NULL,
+                        "opening_cash":               _FLOAT_OR_NULL,
+                        "closing_cash":               _FLOAT_OR_NULL,
+                        "free_cash_flow":             _FLOAT_OR_NULL,
+                        "extraction_confidence":      {"type": "number", "minimum": 0, "maximum": 1},
+                        "extraction_notes":           {"type": ["string", "null"]},
                     },
                     "required": ["fiscal_year"],
                 },
@@ -327,12 +328,10 @@ _STMT_AGENT_CONFIG = {
         "result_key": "income_statements",
         "focus": "Income Statement / Statement of Profit and Loss / Statement of Operations",
         "instructions": (
-            "Focus ONLY on the Income Statement (P&L). "
-            "The top line is Net sales or Revenue from operations. "
+            "Find the Income Statement (P&L). The top line is Net sales or Revenue from operations. "
             "Extract ALL fiscal years shown. "
-            "If the report starts the IS from Gross profit (top-line Net sales is on prior page), "
-            "set revenue = gross_profit + cost_of_sales (derive it — mark confidence 0.85). "
-            "Do NOT extract Balance Sheet or Cash Flow data."
+            "If only Gross profit is visible (Net sales on a prior page), "
+            "set revenue = gross_profit + cost_of_sales and mark confidence 0.85."
         ),
     },
     "bs": {
@@ -340,23 +339,14 @@ _STMT_AGENT_CONFIG = {
         "tool_choice": {"type": "tool", "name": "extract_balance_sheet"},
         "result_key": "balance_sheets",
         "focus": "Balance Sheet / Statement of Financial Position",
-        "instructions": (
-            "Focus ONLY on the Balance Sheet. "
-            "Extract total assets, liabilities, and equity for ALL fiscal years shown. "
-            "Do NOT extract Income Statement or Cash Flow data."
-        ),
+        "instructions": "Find the Balance Sheet. Extract total assets, liabilities, and equity for ALL fiscal years shown.",
     },
     "cf": {
         "tool": _CF_TOOL,
         "tool_choice": {"type": "tool", "name": "extract_cash_flow"},
         "result_key": "cash_flow_statements",
-        "focus": "Statement of Cash Flows / Cash Flow Statement",
-        "instructions": (
-            "Focus ONLY on the Cash Flow Statement. "
-            "Extract CFO, CFI, CFF, and free cash flow for ALL fiscal years shown. "
-            "Capex must be a NEGATIVE number. "
-            "Do NOT extract Income Statement or Balance Sheet data."
-        ),
+        "focus": "Statement of Cash Flows",
+        "instructions": "Find the Cash Flow Statement. Extract CFO, CFI, CFF for ALL fiscal years. Capex must be a NEGATIVE number.",
     },
 }
 
@@ -369,22 +359,15 @@ def _call_statement_agent(
     currency: str,
     unit: str,
 ) -> dict:
-    """
-    Call Claude with a focused single-statement extraction tool.
-    Returns the raw tool_use input dict with the statement list.
-    """
+    """One focused Claude call for a single statement type."""
     cfg = _STMT_AGENT_CONFIG[stmt_type]
     system = (
-        "You are a senior financial analyst. Your ONLY task is to extract the "
-        f"{cfg['focus']} from this annual report with complete accuracy.\n\n"
-        "RULES:\n"
-        "1. Extract numbers EXACTLY as shown — same unit as the report header.\n"
-        "2. Return null for any field not explicitly in the document.\n"
-        "3. Use CONSOLIDATED statements where available.\n"
-        "4. Extract ALL fiscal years present.\n"
-        "5. Depreciation is always positive. Capex is always negative in CF context.\n"
-        f"6. {cfg['instructions']}\n"
-        "7. Always call the provided tool — never return prose."
+        f"You are a senior financial analyst. Extract ONLY the {cfg['focus']} "
+        "from this annual report.\n\n"
+        "RULES: Extract numbers exactly as shown. Use the same unit as the report header. "
+        "Return null for missing fields. Use CONSOLIDATED statements. "
+        "D&A is always positive. Capex is always negative in CF context. "
+        f"{cfg['instructions']} Always call the provided tool — never return prose."
     )
     user = (
         f"Company: {company_name}\n"
@@ -392,8 +375,7 @@ def _call_statement_agent(
         f"Currency/Unit: {currency} {unit}\n\n"
         f"Extract the {cfg['focus']} using the tool."
     )
-    client = _get_client()
-    response = client.messages.create(
+    response = _get_client().messages.create(
         model=MODEL_NAME,
         max_tokens=MAX_TOKENS,
         system=system,
@@ -414,7 +396,7 @@ def _call_statement_agent(
     for block in response.content:
         if block.type == "tool_use":
             return block.input  # type: ignore[return-value]
-    raise ExtractionError(f"Claude [{stmt_type}] did not return a tool_use block.")
+    raise ExtractionError(f"Sub-agent [{stmt_type}] did not return a tool_use block.")
 
 
 def _call_parallel_extraction(
@@ -426,11 +408,12 @@ def _call_parallel_extraction(
 ) -> dict:
     """
     Run 3 focused Claude sub-agents in parallel — one per statement type.
-    Merges results into a single dict compatible with _parse_raw_data.
+    Each agent has a targeted schema and prompt; failures are isolated.
+    Returns a merged dict compatible with _parse_raw_data.
     """
     log.info("Running 3 parallel Claude sub-agents (P&L / BS / CF)…")
-    results = {}
-    errors = {}
+    results: dict = {}
+    errors: dict = {}
 
     with ThreadPoolExecutor(max_workers=3) as pool:
         futures = {
@@ -442,8 +425,7 @@ def _call_parallel_extraction(
             try:
                 data = future.result()
                 results[stmt] = data
-                cfg = _STMT_AGENT_CONFIG[stmt]
-                count = len(data.get(cfg["result_key"], []))
+                count = len(data.get(_STMT_AGENT_CONFIG[stmt]["result_key"], []))
                 log.info("Sub-agent [%s] complete: %d year(s) extracted.", stmt, count)
             except Exception as exc:
                 log.warning("Sub-agent [%s] failed: %s", stmt, exc)
@@ -452,7 +434,6 @@ def _call_parallel_extraction(
     if not results:
         raise ExtractionError(f"All 3 sub-agents failed: {errors}")
 
-    # Merge into single dict for _parse_raw_data
     merged: dict = {
         "company_name": company_name,
         "currency": currency,
@@ -519,6 +500,101 @@ def _call_verification_api(pdf_b64: str, extracted_json: str) -> dict:
     return {"passes_all_checks": True, "issues": [], "warnings": [], "corrected_values": {}}
 
 
+# Income Statement keyword set for page scanning
+_IS_KEYWORDS = frozenset([
+    "revenue", "total income", "net sales", "turnover",
+    "profit after tax", "profit before tax", "net profit",
+    "earnings before", "ebitda", "operating income",
+])
+
+# Max images per Claude vision request (API hard limit is 20)
+_VISION_MAX_PAGES = 20
+
+
+@retry(
+    stop=stop_after_attempt(RETRY_ATTEMPTS),
+    wait=wait_exponential(multiplier=1, min=RETRY_WAIT_MIN, max=RETRY_WAIT_MAX),
+    reraise=True,
+)
+def _call_extraction_api_images(
+    path:         str,
+    company_name: str,
+    years:        List[int],
+    currency:     str = "INR",
+    unit:         str = "Crores",
+) -> dict:
+    """
+    Vision-based fallback extraction.
+
+    Renders PDF pages that contain Income Statement keywords as JPEG images
+    and sends them to Claude with the same tool_use schema.  Used when the
+    document-API gap-fill completes but still returns no revenue data.
+    """
+    import pdfplumber
+
+    log.info("Vision fallback — scanning pages for IS keywords…")
+
+    # Scan every page for IS-related text to pick candidate pages
+    candidate_pages: List[int] = []
+    with pdfplumber.open(path) as pdf:
+        for i, page in enumerate(pdf.pages, start=1):
+            text = (page.extract_text() or "").lower()
+            if any(kw in text for kw in _IS_KEYWORDS):
+                candidate_pages.append(i)
+
+    # If pdfplumber found nothing with IS keywords, fall back to the first half
+    # of the document (IS usually appears before BS in annual reports)
+    if not candidate_pages:
+        total = get_pdf_page_count(path)
+        mid   = max(1, total // 2)
+        candidate_pages = list(range(1, min(mid + 1, _VISION_MAX_PAGES + 1)))
+        log.info("No IS keyword pages found — using pages 1-%d as candidates.", candidate_pages[-1])
+    else:
+        log.info("IS keyword pages: %s", candidate_pages[:_VISION_MAX_PAGES])
+
+    pages_to_render = candidate_pages[:_VISION_MAX_PAGES]
+
+    # Render candidate pages as JPEG images
+    images_b64 = render_pdf_pages_to_images(path, pages_to_render, dpi=150)
+    log.info("Rendered %d page(s) as images for vision extraction.", len(images_b64))
+
+    # Build vision content: one image block per page, then the prompt
+    content: list = []
+    for img_b64 in images_b64:
+        content.append({
+            "type":   "image",
+            "source": {
+                "type":       "base64",
+                "media_type": "image/jpeg",
+                "data":       img_b64,
+            },
+        })
+
+    system_prompt = Path("prompts/extraction_system.txt").read_text()
+    user_template = Path("prompts/extraction_user.txt").read_text()
+    user_prompt   = user_template.format(
+        company_name=company_name,
+        years=", ".join(str(y) for y in years),
+        currency=currency,
+        unit=unit,
+    )
+    content.append({"type": "text", "text": user_prompt})
+
+    response = _get_client().messages.create(
+        model=MODEL_NAME,
+        max_tokens=MAX_TOKENS,
+        system=system_prompt,
+        tools=[EXTRACTION_TOOL],
+        tool_choice=TOOL_CHOICE,
+        messages=[{"role": "user", "content": content}],
+    )
+
+    for block in response.content:
+        if block.type == "tool_use":
+            return block.input  # type: ignore[return-value]
+    raise ExtractionError("Vision fallback: Claude did not return a tool_use block.")
+
+
 # ── Data parsing ──────────────────────────────────────────────────────────────
 
 def _parse_raw_data(raw: dict) -> FinancialData:
@@ -566,48 +642,47 @@ def _merge_extractions(local_data: FinancialData, api_data: FinancialData) -> Fi
             return local_stmt
         if local_stmt is None:
             return api_stmt
-        # Use Pydantic model_fields (works for BaseModel) instead of dataclasses.fields
-        field_names = list(local_stmt.model_fields.keys())
-        updates = {}
-        for name in field_names:
-            if getattr(local_stmt, name) is None:
-                api_val = getattr(api_stmt, name, None)
+        # Use Pydantic model_fields (works for BaseModel subclasses)
+        for field_name in type(local_stmt).model_fields:
+            if getattr(local_stmt, field_name) is None:
+                api_val = getattr(api_stmt, field_name, None)
                 if api_val is not None:
-                    updates[name] = api_val
-        if updates:
-            return local_stmt.model_copy(update=updates)
+                    setattr(local_stmt, field_name, api_val)
         return local_stmt
 
-    # Collect all years from both local and API data
+    # Merge for all years found by either source
     all_years = sorted(set(local_data.fiscal_years) | set(api_data.fiscal_years))
-
-    new_is: list = []
-    new_bs: list = []
-    new_cf: list = []
-
     for yr in all_years:
-        merged_is = _merge_stmt(local_data.get_income_statement(yr), api_data.get_income_statement(yr))
-        if merged_is:
-            new_is.append(merged_is)
+        orig_is   = local_data.get_income_statement(yr)
+        merged_is = _merge_stmt(orig_is, api_data.get_income_statement(yr))
+        if merged_is is not None and (orig_is is None or id(merged_is) != id(orig_is)):
+            if orig_is is None:
+                local_data.income_statements.append(merged_is)
 
-        merged_bs = _merge_stmt(local_data.get_balance_sheet(yr), api_data.get_balance_sheet(yr))
-        if merged_bs:
-            new_bs.append(merged_bs)
+        orig_bs   = local_data.get_balance_sheet(yr)
+        merged_bs = _merge_stmt(orig_bs, api_data.get_balance_sheet(yr))
+        if merged_bs is not None and (orig_bs is None or id(merged_bs) != id(orig_bs)):
+            if orig_bs is None:
+                local_data.balance_sheets.append(merged_bs)
 
-        merged_cf = _merge_stmt(local_data.get_cash_flow(yr), api_data.get_cash_flow(yr))
-        if merged_cf:
-            new_cf.append(merged_cf)
+        orig_cf   = local_data.get_cash_flow(yr)
+        merged_cf = _merge_stmt(orig_cf, api_data.get_cash_flow(yr))
+        if merged_cf is not None and (orig_cf is None or id(merged_cf) != id(orig_cf)):
+            if orig_cf is None:
+                local_data.cash_flow_statements.append(merged_cf)
 
-    local_data.income_statements    = new_is
-    local_data.balance_sheets       = new_bs
-    local_data.cash_flow_statements = new_cf
-    local_data.fiscal_years         = all_years
+    # Update fiscal_years to include any new years added from API
+    local_data.fiscal_years = sorted(set(
+        local_data.fiscal_years
+        + [s.fiscal_year for s in local_data.income_statements]
+        + [s.fiscal_year for s in local_data.balance_sheets]
+        + [s.fiscal_year for s in local_data.cash_flow_statements]
+    ))
 
-    # After API gap-fill, confidence should reflect actual data quality
-    has_revenue = any(s.revenue is not None and s.revenue > 0 for s in new_is)
-    boosted = min(CONFIDENCE_API_BOOST_CAP, local_data.metadata.overall_confidence * CONFIDENCE_API_BOOST)
-    # If API filled in revenue, floor at 0.90
-    local_data.metadata.overall_confidence = max(0.90, boosted) if has_revenue else boosted
+    local_data.metadata.overall_confidence = min(
+        CONFIDENCE_API_BOOST_CAP,
+        local_data.metadata.overall_confidence * CONFIDENCE_API_BOOST,
+    )
     return local_data
 
 
@@ -646,9 +721,27 @@ def extract_from_pdf(
         conf * 100,
     )
 
-    # Pass 2 — parallel Claude sub-agents (P&L / BS / CF) when local confidence is low
-    if ANTHROPIC_API_KEY and conf < CONFIDENCE_API_FALLBACK:
-        log.info("Confidence %.0f%% below threshold — running 3 parallel Claude sub-agents…", conf * 100)
+    # Pass 2 — optional Claude API gap-fill (document-based)
+    # Trigger if confidence is low OR if revenue data is completely missing
+    years = financial_data.sorted_years()
+
+    def _check_has_revenue(fd: "FinancialData") -> bool:
+        return any(
+            (stmt := fd.get_income_statement(y)) is not None
+            and stmt.revenue and stmt.revenue > 0
+            for y in fd.sorted_years()
+        )
+
+    has_revenue    = _check_has_revenue(financial_data)
+    needs_gap_fill = conf < CONFIDENCE_API_FALLBACK or not has_revenue
+
+    if ANTHROPIC_API_KEY and needs_gap_fill:
+        reason = (
+            "no revenue data found"
+            if not has_revenue and conf >= CONFIDENCE_API_FALLBACK
+            else f"confidence {conf:.0%} < {CONFIDENCE_API_FALLBACK:.0%}"
+        )
+        log.info("Running Claude API gap-fill (%s)…", reason)
         try:
             if total_pages > PDF_SMALL_THRESHOLD:
                 toc_b64        = extract_page_range_as_base64(path, 1, PDF_TOC_PAGES)
@@ -664,9 +757,28 @@ def extract_from_pdf(
         except ConfigurationError:
             raise
         except Exception as exc:
-            log.warning("Parallel sub-agent extraction failed (%s) — using local extraction only.", exc)
+            log.warning("Claude API gap-fill failed — using local extraction only.", exc_info=True)
+
+        # Pass 3 — vision fallback if document API gap-fill still found no revenue
+        if not _check_has_revenue(financial_data):
+            log.info("Document API gap-fill returned no revenue — trying vision fallback…")
+            try:
+                raw_vis        = _call_extraction_api_images(
+                    path, company_name, fiscal_years, currency, unit
+                )
+                vis_data       = _parse_raw_data(raw_vis)
+                financial_data = _merge_extractions(financial_data, vis_data)
+                log.info("Vision fallback complete.")
+            except ConfigurationError:
+                raise
+            except Exception as exc:
+                log.warning("Vision fallback failed — proceeding with available data.", exc_info=True)
+
     elif ANTHROPIC_API_KEY:
-        log.info("Local confidence ≥ %.0f%% — skipping Claude API pass.", CONFIDENCE_API_FALLBACK * 100)
+        log.info(
+            "Local confidence >= %.0f%% with revenue present — skipping Claude API pass.",
+            CONFIDENCE_API_FALLBACK * 100,
+        )
     else:
         log.info("No API key set — using local extraction only.")
 
