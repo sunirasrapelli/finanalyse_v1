@@ -785,6 +785,144 @@ def extract_from_pdf(
     return financial_data
 
 
+def extract_from_pdf_range(
+    path:         str,
+    start_page:   int,
+    end_page:     int,
+    company_name: str       = "",
+    fiscal_years: Optional[List[int]] = None,
+    currency:     str       = "INR",
+    unit:         str       = "Crores",
+) -> FinancialData:
+    """
+    Extract Consolidated Financial Statements from a specific page range.
+
+    Called by the multi-agent extraction workers after the TOC Navigator has
+    already identified the correct page range. Skips TOC detection.
+
+    Strategy
+    --------
+    1. Write the page slice to a temp PDF and run local pdfplumber extraction.
+    2. If confidence is low or revenue is missing, run 3 parallel Claude
+       sub-agents (IS / BS / CF) on the page-range base64 and merge results.
+    3. Vision fallback on the same pages if still no revenue.
+    """
+    import os
+    import io
+    import tempfile
+    from pypdf import PdfReader as _PdfReader, PdfWriter as _PdfWriter
+
+    if not validate_pdf(path):
+        raise ExtractionError(f"Invalid or missing PDF: {path}")
+
+    total_pages = get_pdf_page_count(path)
+    start_page  = max(1, start_page)
+    end_page    = min(total_pages, end_page)
+    fiscal_years = fiscal_years or []
+
+    log.info(
+        "extract_from_pdf_range: '%s' pages %d-%d (%d total)",
+        path, start_page, end_page, total_pages,
+    )
+
+    # Slice the PDF into a temp file for local pdfplumber extraction
+    reader = _PdfReader(path)
+    writer = _PdfWriter()
+    for i in range(start_page - 1, end_page):
+        writer.add_page(reader.pages[i])
+
+    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".pdf")
+    try:
+        with os.fdopen(tmp_fd, "wb") as fh:
+            writer.write(fh)
+
+        # Pass 1 - local extraction on the page slice
+        from agents.pdf_parser import extract_local
+        log.info("Local extraction on page slice %d-%d…", start_page, end_page)
+        financial_data = extract_local(tmp_path, company_name, fiscal_years, currency, unit)
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+    conf = financial_data.metadata.overall_confidence
+    log.info(
+        "Local extraction complete. Years: %s. Confidence: %.0f%%",
+        financial_data.fiscal_years, conf * 100,
+    )
+
+    years = financial_data.sorted_years() or fiscal_years
+
+    def _has_revenue(fd: FinancialData) -> bool:
+        return any(
+            (s := fd.get_income_statement(y)) is not None and s.revenue and s.revenue > 0
+            for y in fd.sorted_years()
+        )
+
+    needs_gap_fill = conf < CONFIDENCE_API_FALLBACK or not _has_revenue(financial_data)
+
+    if ANTHROPIC_API_KEY and needs_gap_fill:
+        reason = (
+            "no revenue data"
+            if not _has_revenue(financial_data)
+            else f"confidence {conf:.0%} < threshold"
+        )
+        log.info("Claude API gap-fill on page range (%s)…", reason)
+        try:
+            pdf_b64  = extract_page_range_as_base64(path, start_page, end_page)
+            raw      = _call_parallel_extraction(pdf_b64, company_name, years, currency, unit)
+            api_data = _parse_raw_data(raw)
+            financial_data = _merge_extractions(financial_data, api_data)
+            log.info("Gap-fill (page range) complete.")
+        except ConfigurationError:
+            raise
+        except Exception as exc:
+            log.warning("Claude API gap-fill (range) failed — using local data.", exc_info=True)
+
+        # Vision fallback if still no revenue
+        if not _has_revenue(financial_data):
+            log.info("Vision fallback on page range %d-%d…", start_page, end_page)
+            try:
+                pages_to_render = list(range(start_page, min(end_page + 1, start_page + _VISION_MAX_PAGES)))
+                images_b64 = render_pdf_pages_to_images(path, pages_to_render, dpi=150)
+                content: list = []
+                for img_b64 in images_b64:
+                    content.append({
+                        "type": "image",
+                        "source": {"type": "base64", "media_type": "image/jpeg", "data": img_b64},
+                    })
+                system_prompt = Path("prompts/extraction_system.txt").read_text()
+                user_template = Path("prompts/extraction_user.txt").read_text()
+                user_prompt   = user_template.format(
+                    company_name=company_name,
+                    years=", ".join(str(y) for y in years),
+                    currency=currency,
+                    unit=unit,
+                )
+                content.append({"type": "text", "text": user_prompt})
+                response = _get_client().messages.create(
+                    model=MODEL_NAME,
+                    max_tokens=MAX_TOKENS,
+                    system=system_prompt,
+                    tools=[EXTRACTION_TOOL],
+                    tool_choice=TOOL_CHOICE,
+                    messages=[{"role": "user", "content": content}],
+                )
+                for block in response.content:
+                    if block.type == "tool_use":
+                        vis_data = _parse_raw_data(block.input)
+                        financial_data = _merge_extractions(financial_data, vis_data)
+                        log.info("Vision fallback (range) complete.")
+                        break
+            except ConfigurationError:
+                raise
+            except Exception as exc:
+                log.warning("Vision fallback (range) failed.", exc_info=True)
+
+    return financial_data
+
+
 def extract_from_json(path: str) -> FinancialData:
     """
     Load financial data from a pre-structured JSON file.
