@@ -508,6 +508,9 @@ const AnalysisHeader = ({
   const m: JobMetrics | null | undefined = status.metrics
   const sym  = currencySymbol(status.currency)
   const unit = unitSuffix(status.unit)
+  const metricYears = m?.years?.length
+    ? m.years.map((year) => `FY${year}`).join(' - ')
+    : (status.fiscal_years ?? []).map((year) => `FY${year}`).join(' - ')
 
   const grossMargin = lastVal(m?.gross_margin_pct)
   const fcf         = lastVal(m?.fcf)
@@ -536,6 +539,7 @@ const AnalysisHeader = ({
           </span>
           <span className="stat-label">Gross Margin</span>
           <Sparkline data={sparkData(m?.gross_margin_pct)} color="var(--accent-green)" height={28} />
+          <span className="stat-trend">{metricYears || 'Trend unavailable'}</span>
         </div>
         <div className="stat-item">
           <span className="stat-value">
@@ -545,6 +549,7 @@ const AnalysisHeader = ({
           </span>
           <span className="stat-label">Free Cash Flow</span>
           <Sparkline data={sparkData(m?.fcf)} color="var(--accent-green)" height={28} />
+          <span className="stat-trend">{metricYears || 'Trend unavailable'}</span>
         </div>
         <div className={`stat-item${de !== null && de > 2 ? ' negative' : ''}`}>
           <span className="stat-value">
@@ -554,6 +559,7 @@ const AnalysisHeader = ({
           </span>
           <span className="stat-label">Debt/Equity</span>
           <Sparkline data={sparkData(m?.debt_equity)} color={de !== null && de > 2 ? 'var(--accent-orange)' : 'var(--accent-green)'} height={28} />
+          <span className="stat-trend">{metricYears || 'Trend unavailable'}</span>
         </div>
         <div className="stat-item">
           <span className="stat-value">
@@ -563,6 +569,7 @@ const AnalysisHeader = ({
           </span>
           <span className="stat-label">Revenue</span>
           <Sparkline data={sparkData(m?.revenue)} color="var(--accent-purple)" height={28} />
+          <span className="stat-trend">{metricYears || 'Trend unavailable'}</span>
         </div>
       </div>
 
@@ -627,6 +634,23 @@ interface Recommendation {
   title: string
   description: string
   icon: React.ElementType
+}
+
+function iconForPriority(priority: string): React.ElementType {
+  if (priority === 'HIGH') return AlertTriangle
+  if (priority === 'MEDIUM') return TrendingUp
+  return BarChart3
+}
+
+function buildRecommendations(status: JobStatus | null): Recommendation[] {
+  const nextSteps = status?.next_steps ?? []
+  if (!nextSteps.length) return defaultRecs
+  return nextSteps.map((step) => ({
+    priority: step.priority || 'MEDIUM',
+    title: step.title,
+    description: step.description,
+    icon: iconForPriority(step.priority || 'MEDIUM'),
+  }))
 }
 
 const defaultRecs: Recommendation[] = [
@@ -968,6 +992,8 @@ type PageState = 'idle' | 'running' | 'done' | 'error'
 
 function AnalysePageInner() {
   const searchParams = useSearchParams()
+  const requestedJobId = searchParams.get('job_id')
+  const isHistoryView = Boolean(requestedJobId)
   const [files, setFiles] = useState<FileItem[]>([])
   const [config, setConfig] = useState<Config>({
     companyName: '',
@@ -985,10 +1011,11 @@ function AnalysePageInner() {
   const [jobStatus, setJobStatus] = useState<JobStatus | null>(null)
   const [errorMsg, setErrorMsg] = useState('')
   const pollRef = useRef<NodeJS.Timeout | null>(null)
+  const recommendations = buildRecommendations(jobStatus)
 
   // Restore a previous analysis when navigated from the Reports eye icon
   useEffect(() => {
-    const fromJobId = searchParams.get('job_id')
+    const fromJobId = requestedJobId
     if (!fromJobId) return
     setPageState('running')
 
@@ -1026,7 +1053,7 @@ function AnalysePageInner() {
         setPageState('error')
       })
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [requestedJobId])
 
   // Auto-detect company name + fiscal years when new PDFs are added
   useEffect(() => {
@@ -1117,23 +1144,24 @@ function AnalysePageInner() {
     <>
       <AppHeader />
 
-      <div className="analyse-page">
-        {/* Sidebar */}
-        <aside className="sidebar">
-          <FileUpload files={files} setFiles={setFiles} />
-          <ConfigPanel
-            config={config}
-            setConfig={setConfig}
-            onRun={runAnalysis}
-            isRunning={pageState === 'running'}
-            isDetecting={isDetecting}
-            hasFiles={files.length > 0}
-          />
-          <div className="sidebar-metrics">
-            <h3 className="section-label">QUICK METRICS</h3>
-            <DotMatrix />
-          </div>
-        </aside>
+      <div className={`analyse-page${isHistoryView ? ' report-view' : ''}`}>
+        {!isHistoryView && (
+          <aside className="sidebar">
+            <FileUpload files={files} setFiles={setFiles} />
+            <ConfigPanel
+              config={config}
+              setConfig={setConfig}
+              onRun={runAnalysis}
+              isRunning={pageState === 'running'}
+              isDetecting={isDetecting}
+              hasFiles={files.length > 0}
+            />
+            <div className="sidebar-metrics">
+              <h3 className="section-label">QUICK METRICS</h3>
+              <DotMatrix />
+            </div>
+          </aside>
+        )}
 
         {/* Main */}
         <main className="main-content">
@@ -1146,7 +1174,7 @@ function AnalysePageInner() {
           {pageState === 'done' && jobStatus && jobId && (
             <>
               <AnalysisHeader status={jobStatus} jobId={jobId} />
-              <RecommendationsSection recs={defaultRecs} />
+              <RecommendationsSection recs={recommendations} />
             </>
           )}
 

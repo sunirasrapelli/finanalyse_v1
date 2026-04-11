@@ -627,6 +627,13 @@ body::after {
   overflow: hidden;
 }
 
+.analyse-page.report-view .main-content {
+  width: min(1200px, 100%);
+  margin: 0 auto;
+  padding-top: 2.5rem;
+  padding-bottom: 3rem;
+}
+
 .sidebar {
   width: 340px;
   min-width: 340px;
@@ -1258,6 +1265,10 @@ body::after {
   border-radius: 10px;
 }
 
+.stat-item svg {
+  margin-top: 0.4rem;
+}
+
 .stat-item.negative .stat-value {
   color: var(--accent-orange);
 }
@@ -1272,6 +1283,12 @@ body::after {
 
 .stat-label {
   font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.stat-trend {
+  margin-top: 0.2rem;
+  font-size: 0.72rem;
   color: var(--text-muted);
 }
 
